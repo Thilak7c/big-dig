@@ -22,14 +22,18 @@ You are building a small, single-file 3D "simulation world" for kids (and curiou
 
 ## 1. WORLD — what exists
 
-**Location:** a make-believe open-pit mine set in green tropical hills (inspired by Malaysia). Rolling green hills ring the site, there's a soft blue sky with a few low-poly clouds, and the soil is warm reddish-orange (tropical laterite).
+**Location:** a make-believe **open-pit coal mine** set in green tropical hills (Malaysia/Borneo-inspired). Rolling green hills ring the site (outside it), there's a soft blue sky with a few low-poly clouds, and inside the site everything is dusty dark grey.
+
+**How it works (for kids):** the rock on top of the coal ("overburden") is dug away first and taken to the **waste dump**; then the black **coal seam** is dug and taken to the **coal stockpile**. Most truckloads are rock, not coal.
 
 **Layout** (roughly 400 × 400 m, viewed from above at an angle):
 - **The Pit:** a stepped, terraced hole with 3 benches (each step ~8 m high and ~15 m wide), getting deeper toward the centre. The pit floor is where digging happens.
-- **Soil-layer walls ("cutaway"):** the bench walls show horizontal colour bands: dark brown topsoil on top, then orange-red clay, sand-beige, and grey rock at the bottom. This should read like a slice through a cake.
+- **Soil-layer walls ("cutaway"):** the bench walls show horizontal colour bands, top → bottom: dark topsoil `#5B3A24` (thin) · red-brown clay `#A0522D` · beige sandstone overburden `#C8B58F` (thickest) · **BLACK COAL SEAM** `#1C1C1C` (thick, clearly the "treasure" stripe, ~1 bench high, slight sheen) · grey floor rock `#6E6E6E` below it. This should read like a slice through a cake. The pit floor sits on the coal seam, so the loading area looks black-grey.
 - **Haul road:** one wide, two-lane road spiralling or zig-zagging from the pit floor up the benches to the rim. Low dirt banks (berms, ~1.5 m tall) line the outer edge. Lane markings are not needed; keep a consistent "drive on the left" rule.
 - **Loading spot:** on the pit floor, next to the digger, marked by a flat pad. A **queue marker** (small sign "WAIT HERE") sits ~40 m back along the road.
-- **Dump area:** on the rim, a flat zone where a soil pile grows.
+- **Two destinations** (the haul road reaches both):
+  - **Coal stockpile:** a black cone pile on the rim next to a small grey crusher shed, with a short sloped conveyor running from the crusher to the top of the pile.
+  - **Waste dump:** a beige flat-topped pile (stepped, like a low mesa), further from the pit.
 - **Service lane + crossing:** a narrow side track for the small pickup that crosses the haul road once near the rim, at a "STOP — big trucks first" sign.
 - **Site office:** one small white cabin on the rim, with a flagpole.
 - **Water point:** a small tank tower on the rim where the water truck refills.
@@ -54,14 +58,15 @@ All movement follows fixed paths (splines or waypoint lists). **Nothing ever ove
 1. `DRIVE_DOWN` the haul road to the queue marker.
 2. `WAIT` at the queue marker if the loading spot is taken.
 3. `REVERSE_IN` to the loading pad (beep icon above the truck; the spotter raises the flag).
-4. `LOADING`: the digger does **4 scoops**. Each scoop: bucket dips into the pit face, curls, lifts, the upper body rotates, the bucket **comes in from the back/side, never over the truck's cab**, and dumps. The truck body fills visibly with a soil mound in 4 steps.
+4. `LOADING`: the digger does **4 scoops**. Each scoop: bucket dips into the pit face, curls, lifts, the upper body rotates, the bucket **comes in from the back/side, never over the truck's cab**, and dumps. The truck body fills visibly in 4 steps with a **lumpy heap made of a few low-poly chunks** (like real photos), not a smooth mound.
 5. `HAUL_UP` the road (slower when loaded).
-6. `DUMP` at the dump area: the body tilts up high (the "5-storey" moment) and soil slides onto the pile, then the body lowers.
+6. `DUMP` at its destination (coal → coal stockpile, rock → waste dump): the body tilts up high (the "5-storey" moment) and the load slides onto the pile, then the body lowers.
 7. `RETURN` down the road empty. Repeat.
+- **Loads:** every trip is either **COAL** (black lumpy heap `#1C1C1C`) or **ROCK** (beige lumpy heap `#C8B58F`). Pattern: 1 coal load after every 2 rock loads (rock, rock, coal, …).
 - Only **one** truck at the loading pad at a time (a simple lock). The other waits at the queue marker.
 - Trucks keep a safe following gap. A truck stops if anything is within ~25 m ahead on its lane.
 
-**Big Digger:** idles (small arm sway) when no truck is there. Between trucks it scoops the pit face once and drops the soil on a small pile beside it (to show it's always working).
+**Big Digger:** idles (small arm sway) when no truck is there. Between trucks it scoops the pit face once and drops the soil on a small pile beside it (to show it's always working). It digs the beige rock for rock loads and the black seam for coal loads; the bucket contents match the load colour.
 
 **Flag pickup:** drives a slow loop on the service lane. At the crossing it **always stops and waits until no Mega Hauler is within ~60 m**, then crosses. Its flag light blinks.
 
@@ -70,9 +75,9 @@ All movement follows fixed paths (splines or waypoint lists). **Nothing ever ove
 **Dust:** loaded trucks make small brown dust puffs behind their wheels. Where the road was recently sprayed (a short fading "wet" darker strip), there are no puffs.
 
 **Ground changes over time:**
-- The dump pile grows a little with every trip (scale a cone/heap).
+- The coal stockpile and the waste dump grow separately, each a little with every one of its own loads (scale a cone/heap).
 - Every 5 trips, the pit floor near the digger lowers by ~0.5 m and the digging face steps back, so the pit visibly gets deeper. The digger and loading pad move down with it.
-- At max depth (~4 m below start), show a friendly banner: "Pit step finished! 🎉 Starting the next one…", fade, and reset the pit and pile to the start. The loop continues forever.
+- At max depth (~4 m below start), show a friendly banner: "Pit step finished! 🎉 Starting the next one…" (the banner also shows the pit depth reached), fade, and reset the pit and both piles to the start. The loop continues forever.
 
 ---
 
@@ -81,12 +86,13 @@ All movement follows fixed paths (splines or waypoint lists). **Nothing ever ove
 - **Camera:** OrbitControls with pan, rotate and zoom (mouse and touch). Clamp it so the camera never goes underground or too far away. Start with a nice angled overview of the whole pit.
 - **Click/tap a machine or object** → a friendly fact card (rounded, white, big emoji, 2–4 short lines, close button). Highlight the clicked object with a soft yellow outline or glow. Cards:
   - 🚛 **Mega Hauler**: "I'm one of the biggest trucks in the world! I carry about 345 tonnes in one trip — about as heavy as 50 elephants. When I tip my load, I'm about 15 metres tall — like a 5-storey building! My driver climbs a staircase to reach the seat."
-  - 🦾 **Big Digger**: "I dig and load the trucks. My top half can spin all the way round on my tracks. I fill a Mega Hauler in about 4 scoops. I never swing my bucket over a truck's cab — that keeps the driver safe."
+  - 🦾 **Big Digger**: "I dig and load the trucks. My top half can spin all the way round on my tracks. I fill a Mega Hauler in about 4 scoops. I dig rock first, then the coal underneath. I never swing my bucket over a truck's cab — that keeps the driver safe."
   - 🚩 **Flag Pickup**: "Mega Haulers are so big they can't see small cars close to them. That's why I carry a tall flag with a light — so the big truck drivers can spot me. On mine roads, big trucks always go first."
-  - 💧 **Water Truck**: "I spray water on the roads so dust doesn't fly into the air, into people's eyes, or onto the trees nearby."
+  - 💧 **Water Truck**: "Coal mines are very dusty. I spray water on the roads so dust doesn't fly into the air."
   - 🦺 **Spotter**: "I'm the spotter! I watch the area around the digger and use my flag and hand signals to tell drivers when it's safe."
-  - 🪨 **Pit walls (soil layers)**: "See the stripes? That's the ground sliced open! Top: soft topsoil. Then clay, sand, and hard rock at the bottom."
-  - 🏔️ **Dump pile**: "Every truckload ends up here. Watch it grow!"
+  - ⚫ **Coal seam (pit walls)**: "This black stripe is coal! It was made from plants that were buried and squashed for millions of years. Above it is rock we must move first."
+  - ⚫ **Coal stockpile**: "Coal comes here. The crusher breaks it into smaller pieces, and later it's taken away — much of it is burned in power stations to make electricity."
+  - 🪨 **Waste dump**: "This isn't rubbish — it's the rock that was on top of the coal. One day it can be put back and planted with trees."
 - **"Secrets" toggle button** (the headline learning moment): when ON,
   - each Mega Hauler shows its **blind spot**: a semi-transparent red shape on the ground around the front-right side and rear, close to the truck;
   - a **danger circle** (red ring) shows around the digger's swing area;
@@ -94,16 +100,17 @@ All movement follows fixed paths (splines or waypoint lists). **Nothing ever ove
 - **"Can you spot…?" missions:** a small panel with 3 checkboxes. Clicking the right object ticks it and shows a ⭐:
   1. "Find the spotter with the flag"
   2. "Find the car that waits for big trucks"
-  3. "Find the stripes in the ground"
+  3. "Find the black coal stripe in the ground"
   - When all 3 are found, show "You're a Junior Site Inspector! 🏅".
 
 ---
 
 ## 4. DASHBOARD (tiny, top-left, semi-transparent card)
 Three live numbers, big and readable:
-- 🚛 **Trips:** total completed dump trips
-- ⬇️ **Pit depth:** current depth in metres, 1 decimal place
-- 🐘 **Elephants moved:** `trips × 345 / 7`, rounded (one elephant ≈ 7 tonnes; show a tooltip "1 truckload ≈ 50 elephants")
+- ⚫ **Coal loads:** completed coal trips
+- 🪨 **Rock loads:** completed rock trips
+- 🐘 **Elephants moved:** `total trips × 345 / 7`, rounded (one elephant ≈ 7 tonnes; show a tooltip "1 truckload ≈ 50 elephants")
+- (Pit depth is shown in the finish banner instead.)
 
 ---
 
@@ -116,10 +123,12 @@ Three live numbers, big and readable:
 
 ## 6. Visual style
 - **Accent:** construction yellow `#F5B400` for the machines and UI highlights.
-- **Soil:** topsoil `#5B3A24`, laterite clay `#C1592B`, sand `#E2C08D`, rock `#8A8A8A`, haul road `#B5653A`, site surface (dusty laterite) `#CC7144`, service lane `#D48B5C`.
+- **Site (inside):** site surface / pit floor dusty dark grey `#4A4A48`; haul road slightly lighter `#5C5C5A`; service lane `#7A746A`. No reddish laterite colours on the site.
+- **Pit wall layers:** topsoil `#5B3A24`, red-brown clay `#A0522D`, sandstone overburden `#C8B58F`, coal seam `#1C1C1C`, floor rock `#6E6E6E`.
+- **Loads and piles:** coal `#1C1C1C`, waste rock `#C8B58F`.
 - **Hills:** soft greens `#6DAA5C` / `#4E8B45`. Sky gradient from light blue to near-white.
 - **Other colours:** water truck tank and site office white `#F4F4F4`; tyres and tracks `#2B2B2B`; spotter vest orange `#FF7A1A`; flag orange.
-- **UI:** rounded cards, soft shadows, big friendly type (16–20 px body, 24 px numbers), lots of white space. Works on a 390 px wide phone. Title in the top-centre: **"Big Dig"** with a subtitle "A day inside a giant mine".
+- **UI:** rounded cards, soft shadows, big friendly type (16–20 px body, 24 px numbers), lots of white space. Works on a 390 px wide phone. Title in the top-centre: **"Big Dig"** with a subtitle "A day inside a giant coal mine".
 
 ---
 
@@ -139,6 +148,7 @@ Three live numbers, big and readable:
 **Stages:**
 1. **Land only (nothing moves):** scene, camera, lights, OrbitControls, sky, clouds, green hills, and the empty site ground with reddish soil. No pit yet, no machines, no animation.
 2. **The pit and site (still nothing moves):** the 3-bench pit with soil-layer walls, haul road, berms, loading pad, queue sign, dump area, service lane, crossing sign, site office, water tower.
+   - **2b. Coal mine:** recolour the site to dusty grey, coal-mine wall layers, and replace the dump area with the coal stockpile (+ crusher shed + conveyor) and the waste dump. All later stages use the coal-mine rules: Stage 5 load colours, Stage 9 two piles, Stage 10 new cards, Stage 12 new dashboard, Stage 13 new mission.
 3. **Machines placed, standing still:** Big Digger, 2 Mega Haulers, water truck, flag pickup, spotter, all built at the correct sizes and parked in their start spots. Still no animation.
 4. **First movement — one Mega Hauler:** a single truck drives its full path (down → loading pad → up → dump area → back) on a simple loop. No loading or tipping yet.
 5. **Digger + loading + tipping:** digger scoop animation (4 scoops, never over the cab), soil filling the truck body, body tipping at the dump area, reversing in, the spotter's flag raising.
@@ -157,7 +167,8 @@ Three live numbers, big and readable:
 - [ ] Two Mega Haulers loop forever, take turns at the loading pad, and never overlap.
 - [ ] The digger never swings its bucket over a truck cab.
 - [ ] The pickup always waits for big trucks at the crossing.
-- [ ] The pile grows, the pit deepens, and the world resets cleanly.
+- [ ] Coal and rock loads follow the 2 rock : 1 coal pattern and go to the right pile.
+- [ ] Both piles grow, the pit deepens, and the world resets cleanly.
 - [ ] Every listed object has a fact card, and all 3 missions can be completed.
 - [ ] The Secrets toggle shows blind spots and the danger circle.
 - [ ] No brand names or logos anywhere.
@@ -169,5 +180,7 @@ Three live numbers, big and readable:
 - Title card (top-centre) kept from Stage 1.
 - 32 low-poly tropical trees on the hills only (one InstancedMesh, the two hill greens). No trees on the site.
 - "3 benches" = 3 steps of 8 m; pit floor at −24 m. Bench tops 16 m wide, walls 4 m across.
+- Layer depths: topsoil 0 to −1.5 m, clay to −5 m, sandstone to −16 m, coal seam −16 to −26 m (the whole bottom step, and under the floor), floor rock below −26 m. Flat bench tops and the floor are dusted grey; the walls show the clean stripes.
+- Haul road: pit → ramp → rim, then splits at a junction: north-east branch to the coal yard, south-east branch to the waste dump. The service lane loops around the coal yard and crosses only the coal branch, once.
 - Signs are drawn larger than real life (~3 m boards) so kids can spot them.
 - Local preview: `python -m http.server 8123` in this folder → http://127.0.0.1:8123/

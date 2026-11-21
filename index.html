@@ -33,7 +33,7 @@
 </script>
 </head>
 <body>
-<div id="title"><h1>Big <span>Dig</span></h1><p>A day inside a giant mine</p></div>
+<div id="title"><h1>Big <span>Dig</span></h1><p>A day inside a giant coal mine</p></div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -45,19 +45,22 @@ const WORLD_SIZE = 3000;        // surrounding hill terrain
 const CELL = 25;                // hill terrain cell size (site edge lands on a cell line)
 
 const COLORS = {
-  laterite:  0xC1592B,
-  surface:   0xCC7144,   // sun-dried, dusty laterite on top, so the clay layer below reads as a separate band
+  surface:   0x4A4A48,   // dusty dark grey: site surface, bench tops and pit floor
   hillLight: 0x6DAA5C,
   hillDark:  0x4E8B45,
   skyTop:    0x7FB8E6,
   skyHorizon:0xEEF6FB,
   cloud:     0xFFFFFF,
   topsoil:   0x5B3A24,
-  clay:      0xC1592B,
-  sand:      0xE2C08D,
-  rock:      0x8A8A8A,
-  road:      0xB5653A,
-  lane:      0xD48B5C,
+  clay:      0xA0522D,
+  sandstone: 0xC8B58F,   // overburden
+  coal:      0x1C1C1C,
+  floorRock: 0x6E6E6E,
+  wasteRock: 0xC8B58F,
+  road:      0x5C5C5A,
+  lane:      0x7A746A,
+  shed:      0x8C8C8C,
+  concrete:  0x9A9A9A,
   white:     0xF4F4F4,
   yellow:    0xF5B400,
   steel:     0x7A7A7A,
@@ -74,10 +77,11 @@ const PIT_PROFILE = [[0, -24], [4, -16], [20, -16], [24, -8], [40, -8], [44, 0]]
 const PIT_BOX = { x0: -140, x1: 100, z0: -100, z1: 100 };  // fine-mesh area around the pit (aligned to 20 m)
 const PIT_CELL = 2;
 
-// Soil layers seen in the walls (top of each band, in metres below the surface)
-const LAYER_TOPSOIL = -4, LAYER_CLAY = -12, LAYER_SAND = -20;
+// Layers seen in the walls: the height where each band ENDS (going down from the surface).
+// The coal seam fills the whole bottom step and continues under the floor.
+const LAYERS = { topsoil: -1.5, clay: -5, sandstone: -16.3, coal: -26 };
 
-// Haul road centre line, from the loading area on the pit floor up the ramp to the dump area.
+// Haul road centre line, from the loading area on the pit floor up the ramp to the junction on the rim.
 const HAUL_ROAD_POINTS = [
   [-16, 18],   // 0: road end on the pit floor, beside the loading pad
   [-56, 22],   // 1: foot of the ramp
@@ -86,18 +90,22 @@ const HAUL_ROAD_POINTS = [
   [-96, -46],
   [-80, -64],
   [60, -64],   // 6: top of the ramp, on the rim
-  [100, -64],
-  [120, -52],
-  [135, -45],  // 9: middle of the dump area
+  [88, -64],   // 7: junction — the road splits to the coal yard and the waste dump
 ];
+// The two branches start on the trunk just before the junction so the road surfaces join smoothly
+const COAL_ROAD_POINTS  = [[70, -64], [88, -64], [106, -72], [121, -88], [132, -104]];
+const WASTE_ROAD_POINTS = [[70, -64], [88, -64], [108, -54], [127, -34], [145, -8]];
 const ROAD_HW = 12;             // half width of the two-lane haul road (24 m: trucks are 9.2 m wide)
 const ROAD_FLAT_HW = 13;        // ground is levelled a little wider than the road surface
 const BERM_HEIGHT = 1.5;
 
 const LOADING_PAD = { x: 4, z: 14, w: 22, d: 16 };
 const QUEUE_BACK = 40;          // queue sign is ~40 m back along the road from the loading pad
-const DUMP = { x: 135, z: -45, r: 30 };
-const SERVICE_LANE = { cx: 135, cz: -45, r: 46, hw: 3 };   // loop around the dump area, crosses the haul road once
+// Coal yard: trucks tip into the crusher hopper at the edge of the turning pad; a conveyor feeds the pile.
+const COAL_YARD = { pad: { x: 132, z: -104, r: 18 }, crusher: { x: 157, z: -112 }, pile: { x: 165, z: -138 } };
+// Waste dump: a stepped, flat-topped mesa beside its own turning pad, further from the pit.
+const WASTE_DUMP = { pad: { x: 145, z: -8, r: 18 }, pile: { x: 172, z: 36 } };
+const SERVICE_LANE = { cx: 148, cz: -122, r: 46, hw: 3 };  // loop around the coal yard, crosses the coal branch once
 const OFFICE = { x: 140, z: 28 };
 const WATER_TOWER = { x: 30, z: -94 };
 
@@ -234,6 +242,16 @@ roadPts.forEach((p, i) => {
   p.y = i <= ROAD_FOOT ? FLOOR_Y : i >= ROAD_TOP ? 0 : FLOOR_Y * (ROAD_TOP - i) / (ROAD_TOP - ROAD_FOOT);
 });
 
+// Branch roads on the rim (flat, y = 0)
+function samplePath(points) {
+  const curve = new THREE.CatmullRomCurve3(points.map(([x, z]) => new THREE.Vector3(x, 0, z)), false, 'centripetal');
+  return curve.getSpacedPoints(Math.ceil(curve.getLength() / 2));
+}
+const coalRoadPts = samplePath(COAL_ROAD_POINTS);
+const wasteRoadPts = samplePath(WASTE_ROAD_POINTS);
+const ALL_ROADS = [roadPts, coalRoadPts, wasteRoadPts];
+const distToRoads = (x, z) => Math.min(...ALL_ROADS.map((pts) => nearestOnPath(pts, x, z).d));
+
 // Nearest point on a polyline → distance and that point's height
 function nearestOnPath(pts, x, z) {
   let bd = Infinity, by = 0;
@@ -308,7 +326,7 @@ function buildGrid({ x0, x1, z0, z1, cell, skipCell, height, colorAt }) {
 const groundMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
 const hillLight = new THREE.Color(COLORS.hillLight);
 const hillDark = new THREE.Color(COLORS.hillDark);
-const laterite = new THREE.Color(COLORS.surface);   // the red band blends into the site's surface soil
+const siteEdge = new THREE.Color(COLORS.surface);   // the grass fades into the site's dusty grey at the edge
 const hills = new THREE.Mesh(
   buildGrid({
     x0: -WORLD_SIZE / 2, x1: WORLD_SIZE / 2, z0: -WORLD_SIZE / 2, z1: WORLD_SIZE / 2, cell: CELL,
@@ -316,9 +334,9 @@ const hills = new THREE.Mesh(
     height: heightAt,
     colorAt(c, x, y, z) {
       c.copy(hillLight).lerp(hillDark, clamp(0.5 + 0.5 * waves(z * 1.7, x * 1.7) + (rand() - 0.5) * 0.35, 0, 1));
-      // a thin band of red soil where the site meets the grass
+      // a thin dusty band where the site meets the grass
       const d = Math.hypot(Math.max(Math.abs(x) - SITE_HALF, 0), Math.max(Math.abs(z) - SITE_HALF, 0));
-      c.lerp(laterite, 1 - smoothstep(5, 40, d));
+      c.lerp(siteEdge, 1 - smoothstep(5, 40, d));
     },
   }),
   groundMat
@@ -329,16 +347,19 @@ scene.add(hills);
 
 // ───────────────────────── Site ground + pit (soil-layer material) ─────────────────────────
 // The colour comes from the height of each pixel, so the pit walls show clean horizontal
-// stripes like a slice of cake. Vertex colour (grey) only adds a little light/dark variation.
+// stripes like a slice of cake. Flat ground (bench tops, floor) gets a coat of grey dust;
+// the coal seam is a little glossy. Vertex colour (grey) only adds light/dark variation.
 function makeSoilMaterial() {
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 });
   const uniforms = {
-    uSurface: { value: new THREE.Color(COLORS.surface) },
+    uDust:    { value: new THREE.Color(COLORS.surface) },
     uTopsoil: { value: new THREE.Color(COLORS.topsoil) },
     uClay:    { value: new THREE.Color(COLORS.clay) },
-    uSand:    { value: new THREE.Color(COLORS.sand) },
-    uRock:    { value: new THREE.Color(COLORS.rock) },
+    uSand:    { value: new THREE.Color(COLORS.sandstone) },
+    uCoal:    { value: new THREE.Color(COLORS.coal) },
+    uRock:    { value: new THREE.Color(COLORS.floorRock) },
   };
+  const f = (v) => v.toFixed(2);
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = 'varying float vWorldY;\nvarying float vUp;\n' + shader.vertexShader.replace(
@@ -347,20 +368,27 @@ function makeSoilMaterial() {
   vWorldY = (modelMatrix * vec4(transformed, 1.0)).y;
   vUp = normalize(mat3(modelMatrix) * objectNormal).y;`);
     shader.fragmentShader = `
-      uniform vec3 uSurface, uTopsoil, uClay, uSand, uRock;
+      uniform vec3 uDust, uTopsoil, uClay, uSand, uCoal, uRock;
       varying float vWorldY;
       varying float vUp;
       vec3 soilBand(float y) {
-        if (y > -0.6) return uSurface;
-        if (y > ${LAYER_TOPSOIL.toFixed(1)}) return uTopsoil;
-        if (y > ${LAYER_CLAY.toFixed(1)}) return uClay;
-        if (y > ${LAYER_SAND.toFixed(1)}) return uSand;
+        if (y > -0.6) return uDust;
+        if (y > ${f(LAYERS.topsoil)}) return uTopsoil;
+        if (y > ${f(LAYERS.clay)}) return uClay;
+        if (y > ${f(LAYERS.sandstone)}) return uSand;
+        if (y > ${f(LAYERS.coal)}) return uCoal;
         return uRock;
       }
     ` + shader.fragmentShader.replace(
       '#include <color_fragment>',
-      // steep faces (walls) are a little darker so each step stands out
-      'diffuseColor.rgb = soilBand(vWorldY) * vColor.r * mix(0.8, 1.0, smoothstep(0.35, 0.9, vUp));');
+      // flat ground is dusted grey; steep faces (walls) are a little darker so each step stands out
+      `float flatness = smoothstep(0.8, 0.97, vUp);
+      diffuseColor.rgb = mix(soilBand(vWorldY), uDust, flatness * 0.55) * vColor.r * mix(0.8, 1.0, smoothstep(0.35, 0.9, vUp));`
+    ).replace(
+      '#include <roughnessmap_fragment>',
+      // the coal seam on the walls has a slight sheen
+      `float roughnessFactor = roughness;
+      if (vWorldY <= ${f(LAYERS.sandstone)} && vWorldY > ${f(LAYERS.coal)} && vUp < 0.8) roughnessFactor = 0.42;`);
   };
   return mat;
 }
@@ -461,18 +489,22 @@ const flatMat = (color, offset) => new THREE.MeshLambertMaterial({
 const roadMat = flatMat(COLORS.road, 1);
 const laneMat = flatMat(COLORS.lane, 2);
 
-// Haul road: pit floor → ramp → rim → dump area
-const haulRoad = new THREE.Mesh(buildRibbon(roadPts, ROAD_HW, 0.12), roadMat);
-haulRoad.receiveShadow = true;
-haulRoad.name = 'haulRoad';
-scene.add(haulRoad);
+// Haul road: pit floor → ramp → rim → junction, then one branch to each destination
+for (const [name, pts] of [['haulRoad', roadPts], ['coalRoad', coalRoadPts], ['wasteRoad', wasteRoadPts]]) {
+  const road = new THREE.Mesh(buildRibbon(pts, ROAD_HW, 0.12), roadMat);
+  road.receiveShadow = true;
+  road.name = name;
+  scene.add(road);
+}
 
-// Dump area: a flat, levelled zone on the rim where the soil pile will grow
-const dumpArea = new THREE.Mesh(new THREE.CircleGeometry(DUMP.r, 24).rotateX(-Math.PI / 2), roadMat);
-dumpArea.position.set(DUMP.x, 0.12, DUMP.z);
-dumpArea.receiveShadow = true;
-dumpArea.name = 'dumpArea';
-scene.add(dumpArea);
+// Turning pads at the end of each branch (flat, levelled road surface)
+for (const [name, pad] of [['coalPad', COAL_YARD.pad], ['wastePad', WASTE_DUMP.pad]]) {
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(pad.r, 24).rotateX(-Math.PI / 2), roadMat);
+  disc.position.set(pad.x, 0.12, pad.z);
+  disc.receiveShadow = true;
+  disc.name = name;
+  scene.add(disc);
+}
 
 // Berms: low dirt banks along the outer (drop-off) edge of the ramp
 {
@@ -498,15 +530,15 @@ scene.add(dumpArea);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.computeVertexNormals();
-  const berms = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: COLORS.topsoil, flatShading: true, side: THREE.DoubleSide }));
+  const berms = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: COLORS.wasteRock, flatShading: true, side: THREE.DoubleSide }));
   berms.castShadow = true;
   berms.receiveShadow = true;
   berms.name = 'berms';
   scene.add(berms);
 }
 
-// Service lane: a narrow loop around the dump area for the small pickup.
-// The pickup will drive it with increasing angle, so on the west side it heads north across the haul road.
+// Service lane: a narrow loop around the coal yard for the small pickup.
+// The pickup will drive it in increasing-index order; it crosses the coal branch of the haul road once.
 const lanePts = [];
 for (let k = 0; k < 144; k++) {
   const a = (k / 144) * Math.PI * 2;
@@ -517,9 +549,12 @@ serviceLane.receiveShadow = true;
 serviceLane.name = 'serviceLane';
 scene.add(serviceLane);
 
-// Where the pickup must stop: the last lane point before it reaches the haul road (coming from the south)
-let LANE_STOP = 72;                                   // index 72 = angle π (west side)
-while (nearestOnPath(roadPts, lanePts[LANE_STOP + 1].x, lanePts[LANE_STOP + 1].z).d > ROAD_HW + 4) LANE_STOP++;
+// The crossing is the lane point closest to a haul road. The pickup must stop at the last point
+// before it, while still ROAD_HW + 4 m from the road's centre line.
+const laneRoadDist = lanePts.map((p) => distToRoads(p.x, p.z));
+const LANE_CROSS = laneRoadDist.indexOf(Math.min(...laneRoadDist));
+let LANE_STOP = LANE_CROSS;
+while (laneRoadDist[LANE_STOP] <= ROAD_HW + 4) LANE_STOP = (LANE_STOP - 1 + lanePts.length) % lanePts.length;
 
 // ───────────────────────── Signs (text drawn on a canvas in code) ─────────────────────────
 const SIGN_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
@@ -642,6 +677,357 @@ addProp('siteOffice', [
     part(cyl(0.25, 0.25, 2, 6), COLORS.steel, { at: [0, H - 1.4, 9] }),
   ], WATER_TOWER.x, 0, WATER_TOWER.z);
 }
+
+// ───────────────────────── Coal yard: crusher shed, conveyor, coal stockpile ─────────────────────────
+// A cone of radius 1 and height 1 (base at y = 0) with its rings nudged in and out so it looks lumpy.
+// Matching positions get the same nudge, so the surface stays closed.
+function lumpyCone(radial, rows, seed) {
+  const g = new THREE.ConeGeometry(1, 1, radial, rows).translate(0, 0.5, 0);
+  const pos = g.attributes.position, r = makeRandom(seed), nudge = new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    if (y > 0.99) continue;                                   // keep the tip
+    const key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
+    if (!nudge.has(key)) nudge.set(key, 1 + (r() - 0.5) * 0.24);
+    const k = nudge.get(key), base = y < 0.001;
+    pos.setXYZ(i, x * k, base ? 0 : y * (1 + (k - 1) * 0.6), z * k);
+  }
+  const flat = g.toNonIndexed();
+  flat.computeVertexNormals();
+  return flat;
+}
+
+// Crusher shed with a low hopper on the pad side (trucks tip into it) and a feeder chute
+addProp('crusherShed', [
+  part(box(10, 8, 8), COLORS.shed, { at: [0, 4, 0] }),
+  part(box(10.6, 0.4, 8.6), COLORS.steel, { at: [0, 8.2, 0] }),
+  part(box(0.1, 3, 2.6), COLORS.dark, { at: [5.05, 1.5, 2] }),                        // door
+  part(box(6.4, 1.2, 6.4), COLORS.concrete, { at: [-8, 0.6, 0] }),                    // hopper base
+  part(cyl(4.4, 1.6, 2.4, 4), COLORS.steel, { at: [-8, 2.4, 0], rot: [0, Math.PI / 4, 0] }),   // hopper, top ≈ 3.6 m
+  part(box(5.4, 0.05, 5.4), COLORS.dark, { at: [-8, 3.62, 0] }),                       // hopper opening
+  part(box(3.2, 0.8, 1.6), COLORS.steel, { at: [-4.2, 1.0, 0] }),                     // feeder chute into the shed
+], COAL_YARD.crusher.x, 0, COAL_YARD.crusher.z);
+
+// Coal stockpile: a lumpy black cone (starts small; it will grow in a later stage)
+const coalPile = new THREE.Mesh(lumpyCone(11, 4, 5),
+  new THREE.MeshStandardMaterial({ color: COLORS.coal, flatShading: true, roughness: 0.5, metalness: 0 }));
+coalPile.position.set(COAL_YARD.pile.x, 0, COAL_YARD.pile.z);
+coalPile.scale.set(8, 5.5, 8);
+coalPile.castShadow = coalPile.receiveShadow = true;
+coalPile.name = 'coalPile';
+scene.add(coalPile);
+
+// Sloped conveyor from the top of the crusher shed to above the pile, on two support legs
+{
+  const start = new THREE.Vector3(COAL_YARD.crusher.x + 3, 7.4, COAL_YARD.crusher.z - 4.5);
+  const end = new THREE.Vector3(COAL_YARD.pile.x, 14, COAL_YARD.pile.z);
+  const len = start.distanceTo(end);
+  const conveyor = new THREE.Group();
+  conveyor.name = 'conveyor';
+  conveyor.position.copy(start).lerp(end, 0.5);
+  conveyor.lookAt(end);                                    // local +z now runs up the conveyor
+  conveyor.add(partsMesh('conveyorBelt', [
+    part(box(2.2, 0.7, len), COLORS.steel),
+    part(box(1.6, 0.12, len), COLORS.dark, { at: [0, 0.41, 0] }),
+    part(box(1.6, 1.6, 1.6), COLORS.shed, { at: [0, -0.9, len / 2] }),   // head chute over the pile
+  ]));
+  scene.add(conveyor);
+  const legs = [];
+  for (const t of [0.3, 0.55]) {
+    const p = start.clone().lerp(end, t), h = p.y - 0.4;
+    legs.push(part(box(0.5, h, 0.5), COLORS.steel, { at: [p.x, h / 2, p.z] }));
+  }
+  scene.add(partsMesh('conveyorLegs', legs));
+}
+
+// ───────────────────────── Waste dump: a stepped, flat-topped beige mesa ─────────────────────────
+// Built at unit size (half-width 1, height 1) and scaled, so a later stage can grow it.
+{
+  const sq = Math.SQRT2;                                   // a 4-sided cylinder turned 45° is a square
+  const mesa = partsMesh('wasteDump', [
+    part(cyl(0.85 * sq, 1.0 * sq, 0.55, 4), COLORS.wasteRock, { at: [0, 0.275, 0], rot: [0, Math.PI / 4, 0] }),
+    part(cyl(0.5 * sq, 0.62 * sq, 0.45, 4), COLORS.wasteRock, { at: [0, 0.775, 0], rot: [0, Math.PI / 4, 0] }),
+  ]);
+  mesa.position.set(WASTE_DUMP.pile.x, 0, WASTE_DUMP.pile.z);
+  mesa.scale.set(14, 7, 16);                               // small starting dump: 28 × 32 m, 7 m high
+  scene.add(mesa);
+}
+
+// ───────────────────────── Machines (Stage 3: built at real size, parked, not moving) ─────────────────────────
+// Every machine is a Group whose local +x is "forward". Moving parts are child Groups/Meshes with names,
+// so later stages can animate them: digger.upperBody/boom/stick/bucket, hauler.body + wheels,
+// waterTruck.sprayBar + wheels, pickup.flag/flagLight + wheels, spotter.flagArm.
+const MACHINE_COLORS = {
+  vest: 0xFF7A1A, flag: 0xFF7A1A, reflect: 0xDDDDDD, skin: 0xB07A55,
+  trousers: 0x3B4A5A, shirt: 0x34506E, counterweight: 0xD9A000, light: 0xFFB000,
+};
+
+function partsMesh(name, parts, material = propMat) {
+  const mesh = new THREE.Mesh(mergeParts(parts), material);
+  mesh.name = name;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+// Pivot group at a point; children are built relative to it.
+function pivot(name, x, y, z) {
+  const g = new THREE.Group();
+  g.name = name;
+  g.position.set(x, y, z);
+  return g;
+}
+// A wheel spins around its local z axis (the axle), so later stages just change wheel.rotation.z
+function makeWheel(name, radius, width, x, y, z, hubColor = COLORS.steel) {
+  const w = partsMesh(name, [
+    part(cyl(radius, radius, width, 14), COLORS.dark, { rot: [Math.PI / 2, 0, 0] }),
+    part(cyl(radius * 0.5, radius * 0.5, width + 0.04, 8), hubColor, { rot: [Math.PI / 2, 0, 0] }),
+  ]);
+  w.position.set(x, y, z);
+  return w;
+}
+// Stand a machine on the ground facing a heading (hx, hz)
+function placeMachine(obj, x, z, hx, hz) {
+  obj.position.set(x, groundAt(x, z), z);
+  obj.rotation.y = Math.atan2(-hz, hx);
+  scene.add(obj);
+}
+
+// ── Big Digger: tracks, rotating upper body, boom + stick + bucket, raised cab (~8 m), counterweight ──
+function makeDigger() {
+  const Y = COLORS.yellow, D = COLORS.dark, S = COLORS.steel;
+  const digger = new THREE.Group();
+  digger.name = 'bigDigger';
+
+  const under = [];
+  for (const s of [-1, 1]) {
+    under.push(part(box(7.0, 1.8, 1.4), D, { at: [0, 0.9, s * 2.7] }));
+    under.push(part(cyl(0.9, 0.9, 1.4, 10), D, { at: [3.5, 0.9, s * 2.7], rot: [Math.PI / 2, 0, 0] }));
+    under.push(part(cyl(0.9, 0.9, 1.4, 10), D, { at: [-3.5, 0.9, s * 2.7], rot: [Math.PI / 2, 0, 0] }));
+  }
+  under.push(part(box(3.4, 1.0, 4.0), S, { at: [0, 1.7, 0] }));
+  under.push(part(cyl(2.0, 2.2, 0.5, 12), S, { at: [0, 2.45, 0] }));
+  digger.add(partsMesh('undercarriage', under));
+
+  // Upper body turns on the swing ring (rotation.y)
+  const upper = pivot('upperBody', 0, 2.7, 0);
+  upper.add(partsMesh('house', [
+    part(box(6.6, 2.6, 5.6), Y, { at: [-0.9, 1.4, 0] }),
+    part(box(1.4, 2.4, 5.6), MACHINE_COLORS.counterweight, { at: [-4.9, 1.3, 0] }),   // counterweight at the back
+    part(box(3.4, 0.5, 4.6), Y, { at: [-2.4, 2.95, 0] }),
+    part(cyl(0.15, 0.15, 1.0, 6), D, { at: [-2.0, 3.6, 1.4] }),
+    part(box(2.4, 1.0, 2.0), Y, { at: [1.3, 3.2, -1.7] }),                          // cab pedestal
+    part(box(2.4, 1.8, 2.0), Y, { at: [1.3, 4.6, -1.7] }),                          // cab, top ≈ 8.2 m
+    part(box(0.08, 1.1, 1.8), COLORS.glass, { at: [2.52, 4.75, -1.7] }),
+    part(box(1.8, 1.1, 0.08), COLORS.glass, { at: [1.3, 4.75, -2.72] }),
+  ]));
+
+  // Boom → stick → bucket, each turning around its own pin (rotation.z)
+  const boom = pivot('boom', 2.2, 1.6, 0.9);
+  boom.rotation.z = 0.75;
+  boom.add(partsMesh('boomArm', [
+    part(box(9.6, 1.4, 1.3), Y, { at: [4.6, 0, 0] }),
+    part(box(5.0, 0.35, 0.35), S, { at: [2.5, -0.9, 0.45] }),
+    part(box(5.0, 0.35, 0.35), S, { at: [2.5, -0.9, -0.45] }),
+  ]));
+  const stick = pivot('stick', 9.4, 0, 0);
+  stick.rotation.z = -2.05;
+  stick.add(partsMesh('stickArm', [
+    part(box(5.6, 1.0, 1.0), Y, { at: [2.6, 0, 0] }),
+    part(box(3.5, 0.3, 0.3), S, { at: [1.5, 0.7, 0] }),
+  ]));
+  const bucket = pivot('bucket', 5.4, 0, 0);
+  bucket.rotation.z = -0.6;
+  const bucketParts = [part(box(2.8, 2.2, 3.8), Y, { at: [1.4, -1.0, 0] })];
+  for (let k = -2; k <= 2; k++) {
+    bucketParts.push(part(new THREE.ConeGeometry(0.18, 0.6, 5), D, { at: [2.95, -1.9, k * 0.8], rot: [0, 0, -Math.PI / 2] }));
+  }
+  bucket.add(partsMesh('bucketShell', bucketParts));
+  stick.add(bucket);
+  boom.add(stick);
+  upper.add(boom);
+  digger.add(upper);
+  return digger;
+}
+
+// ── Mega Hauler: 14.5 m long, 9.2 m wide, cab top ~6.5 m; huge tyres, canopy, front staircase, tipping body ──
+function makeMegaHauler(name) {
+  const Y = COLORS.yellow, D = COLORS.dark, S = COLORS.steel, G = COLORS.glass;
+  const truck = new THREE.Group();
+  truck.name = name;
+
+  const chassis = [
+    part(box(11.5, 1.2, 2.6), D, { at: [-0.5, 2.3, 0] }),                 // main frame
+    part(box(2.2, 3.0, 3.6), Y, { at: [4.9, 3.0, 0] }),                   // engine housing (set back so the stairs fit)
+    part(box(0.12, 2.2, 2.6), D, { at: [6.05, 3.1, 0] }),                 // radiator grille
+    part(box(1.2, 0.8, 4.0), Y, { at: [6.6, 1.4, 0] }),                   // front bumper
+    part(box(3.8, 0.35, 9.2), Y, { at: [5.3, 4.7, 0] }),                  // upper deck
+    part(box(2.8, 1.65, 3.0), Y, { at: [5.2, 5.7, -2.9] }),               // cab on the left, top ≈ 6.5 m
+    part(box(0.08, 0.9, 2.6), G, { at: [6.62, 5.9, -2.9] }),
+    part(box(2.2, 0.9, 0.08), G, { at: [5.2, 5.9, -4.42] }),
+    part(box(0.08, 0.9, 5.6), Y, { at: [7.15, 5.35, 1.6] }),              // deck handrail
+    part(box(2.8, 1.4, 1.4), Y, { at: [0, 2.3, -2.6] }),                  // fuel tank
+    part(box(2.8, 1.4, 1.4), Y, { at: [0, 2.3, 2.6] }),                   // hydraulic tank
+    part(box(0.8, 1.2, 1.0), D, { at: [-6.4, 3.4, 1.0] }),                // body hinge brackets
+    part(box(0.8, 1.2, 1.0), D, { at: [-6.4, 3.4, -1.0] }),
+  ];
+  // Diagonal staircase across the front: low on the right, up to the deck near the cab
+  const stairLow = [3.6, 0.7], stairHigh = [-0.6, 4.5], steps = 9;
+  const stairLen = Math.hypot(stairLow[0] - stairHigh[0], stairHigh[1] - stairLow[1]);
+  const stairTilt = Math.atan2(stairHigh[1] - stairLow[1], stairLow[0] - stairHigh[0]);
+  const midZ = (stairLow[0] + stairHigh[0]) / 2, midY = (stairLow[1] + stairHigh[1]) / 2;
+  for (let k = 0; k <= steps; k++) {
+    const t = k / steps;
+    chassis.push(part(box(0.7, 0.12, 0.6), S, { at: [6.8, stairLow[1] + (stairHigh[1] - stairLow[1]) * t, stairLow[0] + (stairHigh[0] - stairLow[0]) * t] }));
+  }
+  chassis.push(part(box(0.1, 0.25, stairLen), Y, { at: [6.4, midY, midZ], rot: [stairTilt, 0, 0] }));
+  chassis.push(part(box(0.1, 0.25, stairLen), Y, { at: [7.2, midY, midZ], rot: [stairTilt, 0, 0] }));
+  chassis.push(part(box(0.08, 0.08, stairLen), Y, { at: [7.2, midY + 1.0, midZ], rot: [stairTilt, 0, 0] }));   // handrail
+  truck.add(partsMesh('chassis', chassis));
+
+  // Tyres (~4 m tall, taller than a person): single at the front, doubles at the back
+  const wheels = [];
+  for (const s of [-1, 1]) {
+    wheels.push(makeWheel(s < 0 ? 'wheelFL' : 'wheelFR', 2.0, 1.4, 3.6, 2.0, s * 3.85, Y));
+    wheels.push(makeWheel(s < 0 ? 'wheelRLo' : 'wheelRRo', 2.0, 1.4, -3.6, 2.0, s * 3.85, Y));
+    wheels.push(makeWheel(s < 0 ? 'wheelRLi' : 'wheelRRi', 2.0, 1.4, -3.6, 2.0, s * 2.35, Y));
+  }
+  wheels.forEach((w) => truck.add(w));
+
+  // Tipping body: pivots at the rear hinge (rotation.z > 0 lifts the front)
+  const HINGE = [-6.4, 3.9];
+  const body = pivot('body', HINGE[0], HINGE[1], 0);
+  const at = (x, y, z) => [x - HINGE[0], y - HINGE[1], z];
+  const bodyParts = [
+    part(box(11.4, 0.4, 8.8), Y, { at: at(-1.5, 4.3, 0) }),               // floor
+    part(box(11.4, 2.8, 0.3), Y, { at: at(-1.5, 5.9, 4.3) }),             // side walls
+    part(box(11.4, 2.8, 0.3), Y, { at: at(-1.5, 5.9, -4.3) }),
+    part(box(0.35, 2.8, 8.8), Y, { at: at(4.0, 5.9, 0) }),                // front wall
+    part(box(3.2, 0.3, 8.8), Y, { at: at(5.6, 7.45, 0) }),                // canopy over the cab
+  ];
+  for (const x of [-5, -2.5, 0, 2.5]) {                                    // side ribs
+    bodyParts.push(part(box(0.35, 2.8, 0.2), Y, { at: at(x, 5.9, 4.5) }));
+    bodyParts.push(part(box(0.35, 2.8, 0.2), Y, { at: at(x, 5.9, -4.5) }));
+  }
+  body.add(partsMesh('bodyShell', bodyParts));
+  truck.add(body);
+  truck.userData = { kind: 'megaHauler', body, wheels };
+  return truck;
+}
+
+// ── Water truck: ~12 m, yellow cab, white tank, spray bar at the back ──
+function makeWaterTruck() {
+  const Y = COLORS.yellow, D = COLORS.dark, G = COLORS.glass;
+  const truck = new THREE.Group();
+  truck.name = 'waterTruck';
+  truck.add(partsMesh('waterTruckBody', [
+    part(box(11.4, 0.5, 1.6), D, { at: [0, 1.15, 0] }),
+    part(box(2.4, 2.3, 2.6), Y, { at: [4.6, 2.55, 0] }),                       // cab
+    part(box(0.5, 1.2, 2.4), Y, { at: [6.0, 1.9, 0] }),                        // nose
+    part(box(0.08, 0.9, 2.2), G, { at: [5.82, 3.0, 0] }),
+    part(box(1.4, 0.8, 0.08), G, { at: [4.8, 3.0, 1.31] }),
+    part(box(1.4, 0.8, 0.08), G, { at: [4.8, 3.0, -1.31] }),
+    part(cyl(1.5, 1.5, 8.2, 12), COLORS.white, { at: [-1.4, 2.95, 0], rot: [0, 0, Math.PI / 2] }),   // tank
+    part(box(1.6, 0.25, 2.7), Y, { at: [4.2, 1.75, 0] }),                      // front mudguards
+  ]));
+  const sprayBar = partsMesh('sprayBar', [
+    part(cyl(0.12, 0.12, 2.8, 6), COLORS.steel, { rot: [Math.PI / 2, 0, 0] }),
+    ...[-1.1, -0.4, 0.4, 1.1].map((z) => part(box(0.2, 0.25, 0.2), COLORS.steel, { at: [-0.1, -0.15, z] })),
+  ]);
+  sprayBar.position.set(-5.9, 0.9, 0);
+  truck.add(sprayBar);
+  const wheels = [];
+  for (const s of [-1, 1]) for (const x of [4.2, -2.4, -3.8]) {
+    wheels.push(makeWheel(`wheel${x}_${s}`, 0.55, 0.5, x, 0.55, s * 1.05));
+  }
+  wheels.forEach((w) => truck.add(w));
+  truck.userData = { kind: 'waterTruck', sprayBar, wheels };
+  return truck;
+}
+
+// ── Flag pickup: ~5 m white pickup with a ~4 m whip pole, orange flag and a small light on top ──
+function makeFlagPickup() {
+  const W = COLORS.white, D = COLORS.dark, G = COLORS.glass;
+  const car = new THREE.Group();
+  car.name = 'flagPickup';
+  car.add(partsMesh('pickupBody', [
+    part(box(5.2, 0.75, 1.9), W, { at: [0, 0.8, 0] }),
+    part(box(2.0, 0.75, 1.8), W, { at: [0.3, 1.55, 0] }),                  // cab
+    part(box(0.08, 0.55, 1.6), G, { at: [1.32, 1.58, 0] }),
+    part(box(1.6, 0.5, 0.08), G, { at: [0.3, 1.6, 0.91] }),
+    part(box(1.6, 0.5, 0.08), G, { at: [0.3, 1.6, -0.91] }),
+    part(box(0.08, 0.5, 1.6), G, { at: [-0.72, 1.6, 0] }),
+    part(box(1.9, 0.4, 0.1), W, { at: [-1.6, 1.375, 0.9] }),               // bed walls + tailgate
+    part(box(1.9, 0.4, 0.1), W, { at: [-1.6, 1.375, -0.9] }),
+    part(box(0.1, 0.4, 1.9), W, { at: [-2.55, 1.375, 0] }),
+    part(box(0.15, 0.25, 1.9), D, { at: [2.62, 0.55, 0] }),                 // bumpers
+    part(box(0.15, 0.25, 1.9), D, { at: [-2.62, 0.55, 0] }),
+    part(cyl(0.035, 0.05, 4.0, 6), 0xE8E8E8, { at: [-2.3, 3.2, 0.75] }),  // whip pole, 1.2 → 5.2 m
+  ]));
+  const flag = new THREE.Mesh(box(0.7, 0.45, 0.03), new THREE.MeshLambertMaterial({ color: MACHINE_COLORS.flag }));
+  flag.name = 'flag';
+  flag.position.set(-2.68, 4.85, 0.75);
+  flag.castShadow = true;
+  const flagLight = new THREE.Mesh(new THREE.IcosahedronGeometry(0.11, 1),
+    new THREE.MeshLambertMaterial({ color: MACHINE_COLORS.light, emissive: MACHINE_COLORS.light, emissiveIntensity: 1 }));
+  flagLight.name = 'flagLight';
+  flagLight.position.set(-2.3, 5.3, 0.75);
+  car.add(flag, flagLight);
+  const wheels = [];
+  for (const s of [-1, 1]) for (const x of [1.6, -1.6]) wheels.push(makeWheel(`wheel${x}_${s}`, 0.4, 0.3, x, 0.4, s * 0.85));
+  wheels.forEach((w) => car.add(w));
+  car.userData = { kind: 'flagPickup', flag, flagLight, wheels };
+  return car;
+}
+
+// ── Spotter: ~1.7 m person in an orange hi-vis vest and hard hat, holding a flag ──
+function makeSpotter() {
+  const C = MACHINE_COLORS;
+  const person = new THREE.Group();
+  person.name = 'spotter';
+  person.add(partsMesh('spotterBody', [
+    part(box(0.28, 0.12, 0.13), COLORS.dark, { at: [0.04, 0.06, 0.1] }),
+    part(box(0.28, 0.12, 0.13), COLORS.dark, { at: [0.04, 0.06, -0.1] }),
+    part(box(0.16, 0.8, 0.14), C.trousers, { at: [0, 0.52, 0.1] }),
+    part(box(0.16, 0.8, 0.14), C.trousers, { at: [0, 0.52, -0.1] }),
+    part(box(0.24, 0.5, 0.4), C.shirt, { at: [0, 1.17, 0] }),
+    part(box(0.27, 0.42, 0.43), C.vest, { at: [0, 1.2, 0] }),
+    part(box(0.275, 0.05, 0.435), C.reflect, { at: [0, 1.08, 0] }),      // reflective stripes
+    part(box(0.275, 0.05, 0.435), C.reflect, { at: [0, 1.28, 0] }),
+    part(new THREE.IcosahedronGeometry(0.11, 1), C.skin, { at: [0, 1.54, 0] }),
+    part(new THREE.SphereGeometry(0.13, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2), COLORS.white, { at: [0, 1.57, 0] }),   // hard hat, top ≈ 1.7 m
+    part(cyl(0.16, 0.16, 0.02, 10), COLORS.white, { at: [0.02, 1.57, 0] }),
+    part(box(0.1, 0.6, 0.1), C.shirt, { at: [0, 1.12, -0.25] }),          // left arm
+    part(new THREE.IcosahedronGeometry(0.05, 0), C.skin, { at: [0, 0.79, -0.25] }),
+  ]));
+  // Right arm with the flag: rotate flagArm.rotation.z upward to raise the flag
+  const flagArm = pivot('flagArm', 0, 1.38, 0.25);
+  flagArm.add(partsMesh('flagArmParts', [
+    part(box(0.1, 0.6, 0.1), C.shirt, { at: [0, -0.3, 0] }),
+    part(new THREE.IcosahedronGeometry(0.05, 0), C.skin, { at: [0, -0.62, 0] }),
+    part(cyl(0.012, 0.012, 0.9, 5), COLORS.steel, { at: [0.42, -0.62, 0], rot: [0, 0, Math.PI / 2] }),
+    part(box(0.35, 0.25, 0.02), C.flag, { at: [0.72, -0.48, 0] }),
+  ]));
+  person.add(flagArm);
+  person.userData = { kind: 'spotter', flagArm };
+  return person;
+}
+
+// ── Start spots (nothing on a haul-road lane, the pad approach or the crossing) ──
+const SERVICE_LANE_START = (LANE_CROSS + lanePts.length / 2) % lanePts.length;   // far side of the loop from the crossing
+const digger = makeDigger();
+placeMachine(digger, 12, -3, 1, 0);                // pit floor beside the pad, facing the east digging face
+const haulers = [makeMegaHauler('megaHauler1'), makeMegaHauler('megaHauler2')];
+placeMachine(haulers[0], 92, -20, -1, 0);          // parked on the rim between the pit and the waste branch, off every road
+placeMachine(haulers[1], 92, 2, -1, 0);
+const waterTruck = makeWaterTruck();
+placeMachine(waterTruck, 30, -85, 1, 0);           // under the water tower spout, off the road
+const flagPickup = makeFlagPickup();
+{
+  const p = lanePts[SERVICE_LANE_START], L = leftAt(lanePts, SERVICE_LANE_START, true);
+  placeMachine(flagPickup, p.x, p.z, L.tx, L.tz);
+}
+const spotter = makeSpotter();
+placeMachine(spotter, -2, 29, -4, -15);            // south of the pad, facing it, outside the digger's swing
 
 // ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
 const puffs = [];
