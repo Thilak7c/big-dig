@@ -42,17 +42,64 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ───────────────────────── Constants (1 unit = 1 metre) ─────────────────────────
 const SITE_HALF = 200;          // mine site is 400 × 400 m, centred on the origin
 const WORLD_SIZE = 3000;        // surrounding hill terrain
-const CELL = 25;                // terrain cell size (site edge lands on a cell line)
+const CELL = 25;                // hill terrain cell size (site edge lands on a cell line)
 
 const COLORS = {
   laterite:  0xC1592B,
-  lateriteLight: 0xCC6B3D,
+  surface:   0xCC7144,   // sun-dried, dusty laterite on top, so the clay layer below reads as a separate band
   hillLight: 0x6DAA5C,
   hillDark:  0x4E8B45,
   skyTop:    0x7FB8E6,
   skyHorizon:0xEEF6FB,
   cloud:     0xFFFFFF,
+  topsoil:   0x5B3A24,
+  clay:      0xC1592B,
+  sand:      0xE2C08D,
+  rock:      0x8A8A8A,
+  road:      0xB5653A,
+  lane:      0xD48B5C,
+  white:     0xF4F4F4,
+  yellow:    0xF5B400,
+  steel:     0x7A7A7A,
+  dark:      0x2B2B2B,
+  glass:     0x5D7A8C,
+  padGrey:   0xA8A29A,
 };
+
+// The pit: a rounded-rectangle floor with 3 steps (wall 4 m across, bench 16 m wide, 8 m high each).
+const PIT = { cx: -20, cz: 0, fx: 44, fz: 34, r: 10 };   // floor centre, half-size and corner radius
+const FLOOR_Y = -24;
+// [distance outside the floor edge, height]: floor → wall → bench → wall → bench → wall → rim
+const PIT_PROFILE = [[0, -24], [4, -16], [20, -16], [24, -8], [40, -8], [44, 0]];
+const PIT_BOX = { x0: -140, x1: 100, z0: -100, z1: 100 };  // fine-mesh area around the pit (aligned to 20 m)
+const PIT_CELL = 2;
+
+// Soil layers seen in the walls (top of each band, in metres below the surface)
+const LAYER_TOPSOIL = -4, LAYER_CLAY = -12, LAYER_SAND = -20;
+
+// Haul road centre line, from the loading area on the pit floor up the ramp to the dump area.
+const HAUL_ROAD_POINTS = [
+  [-16, 18],   // 0: road end on the pit floor, beside the loading pad
+  [-56, 22],   // 1: foot of the ramp
+  [-80, 30],
+  [-96, 10],
+  [-96, -46],
+  [-80, -64],
+  [60, -64],   // 6: top of the ramp, on the rim
+  [100, -64],
+  [120, -52],
+  [135, -45],  // 9: middle of the dump area
+];
+const ROAD_HW = 12;             // half width of the two-lane haul road (24 m: trucks are 9.2 m wide)
+const ROAD_FLAT_HW = 13;        // ground is levelled a little wider than the road surface
+const BERM_HEIGHT = 1.5;
+
+const LOADING_PAD = { x: 4, z: 14, w: 22, d: 16 };
+const QUEUE_BACK = 40;          // queue sign is ~40 m back along the road from the loading pad
+const DUMP = { x: 135, z: -45, r: 30 };
+const SERVICE_LANE = { cx: 135, cz: -45, r: 46, hw: 3 };   // loop around the dump area, crosses the haul road once
+const OFFICE = { x: 140, z: 28 };
+const WATER_TOWER = { x: 30, z: -94 };
 
 // Small seeded random so the world looks the same on every load
 function makeRandom(seed) {
@@ -64,6 +111,9 @@ function makeRandom(seed) {
   };
 }
 const rand = makeRandom(7);
+const cloudRand = makeRandom(21);
+const treeRand = makeRandom(33);
+const soilRand = makeRandom(45);
 
 const smoothstep = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -130,7 +180,7 @@ const sky = new THREE.Mesh(new THREE.SphereGeometry(4000, 24, 12), skyMat);
 sky.renderOrder = -1;
 scene.add(sky);
 
-// ───────────────────────── Ground: hills + site ─────────────────────────
+// ───────────────────────── Height functions ─────────────────────────
 // Gentle wavy noise made from a few sine waves (cheap and smooth)
 function waves(x, z) {
   return 0.5 * Math.sin(x * 0.0105 + 1.3) * Math.cos(z * 0.0125 - 0.7)
@@ -138,7 +188,7 @@ function waves(x, z) {
        + 0.2 * Math.sin(z * 0.041 + x * 0.007);
 }
 
-// Height of the land: flat (0) on the site, rising into a ring of green hills outside it
+// Height of the hills: 0 at the site edge, rising into a ring of green hills outside it
 function heightAt(x, z) {
   const dx = Math.max(Math.abs(x) - SITE_HALF, 0);
   const dz = Math.max(Math.abs(z) - SITE_HALF, 0);
@@ -150,26 +200,98 @@ function heightAt(x, z) {
   return Math.max(nearHills + farHills, 0);
 }
 
-// Builds a flat-shaded triangle grid. Each triangle gets one colour from colorAt().
-function buildGrid({ size, cell, skipCell, height, colorAt }) {
-  const half = size / 2, n = Math.round(size / cell);
+// Terraced pit: how far a point is outside the floor's rounded rectangle → height from PIT_PROFILE
+function pitProfile(x, z) {
+  const lx = Math.abs(x - PIT.cx) - (PIT.fx - PIT.r);
+  const lz = Math.abs(z - PIT.cz) - (PIT.fz - PIT.r);
+  const s = Math.hypot(Math.max(lx, 0), Math.max(lz, 0)) + Math.min(Math.max(lx, lz), 0) - PIT.r;
+  if (s <= 0) return PIT_PROFILE[0][1];
+  for (let i = 1; i < PIT_PROFILE.length; i++) {
+    const [s1, h1] = PIT_PROFILE[i];
+    if (s <= s1) {
+      const [s0, h0] = PIT_PROFILE[i - 1];
+      return h0 + (h1 - h0) * (s - s0) / (s1 - s0);
+    }
+  }
+  return 0;
+}
+
+// ───────────────────────── Haul road path ─────────────────────────
+const roadCurve = new THREE.CatmullRomCurve3(
+  HAUL_ROAD_POINTS.map(([x, z]) => new THREE.Vector3(x, 0, z)), false, 'centripetal');
+const ROAD_SAMPLES = Math.ceil(roadCurve.getLength() / 2);
+const roadPts = roadCurve.getSpacedPoints(ROAD_SAMPLES);
+const ROAD_STEP = roadCurve.getLength() / ROAD_SAMPLES;      // ≈ 2 m between samples
+const nearestSample = (pts, x, z) => {
+  let best = 0, bd = Infinity;
+  pts.forEach((p, i) => { const d = (p.x - x) ** 2 + (p.z - z) ** 2; if (d < bd) { bd = d; best = i; } });
+  return best;
+};
+const ROAD_FOOT = nearestSample(roadPts, ...HAUL_ROAD_POINTS[1]);
+const ROAD_TOP = nearestSample(roadPts, ...HAUL_ROAD_POINTS[6]);
+// Flat on the floor, an even slope up the ramp (~9%), flat on the rim
+roadPts.forEach((p, i) => {
+  p.y = i <= ROAD_FOOT ? FLOOR_Y : i >= ROAD_TOP ? 0 : FLOOR_Y * (ROAD_TOP - i) / (ROAD_TOP - ROAD_FOOT);
+});
+
+// Nearest point on a polyline → distance and that point's height
+function nearestOnPath(pts, x, z) {
+  let bd = Infinity, by = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const abx = b.x - a.x, abz = b.z - a.z;
+    const t = clamp(((x - a.x) * abx + (z - a.z) * abz) / (abx * abx + abz * abz), 0, 1);
+    const d = (a.x + abx * t - x) ** 2 + (a.z + abz * t - z) ** 2;
+    if (d < bd) { bd = d; by = a.y + (b.y - a.y) * t; }
+  }
+  return { d: Math.sqrt(bd), y: by };
+}
+
+// Left-pointing unit vector (in XZ) of a path at sample i
+function leftAt(pts, i, closed = false) {
+  const n = pts.length;
+  const a = closed ? pts[(i - 1 + n) % n] : pts[Math.max(i - 1, 0)];
+  const b = closed ? pts[(i + 1) % n] : pts[Math.min(i + 1, n - 1)];
+  const tx = b.x - a.x, tz = b.z - a.z, len = Math.hypot(tx, tz) || 1;
+  return { x: tz / len, z: -tx / len, tx: tx / len, tz: tz / len };
+}
+
+// Final ground height inside the pit area: terraces, with the ramp cut/filled in at 45° side slopes
+function groundH(x, z) {
+  const p = pitProfile(x, z);
+  const { d, y } = nearestOnPath(roadPts, x, z);
+  if (d <= ROAD_FLAT_HW) return y;
+  const diff = p - y, over = d - ROAD_FLAT_HW;
+  if (over < Math.abs(diff)) return y + Math.sign(diff) * over;
+  return p;
+}
+
+// Ground height anywhere (used to keep the camera above ground)
+function groundAt(x, z) {
+  if (x > PIT_BOX.x0 && x < PIT_BOX.x1 && z > PIT_BOX.z0 && z < PIT_BOX.z1) return groundH(x, z);
+  return heightAt(x, z);
+}
+
+// ───────────────────────── Grid builder ─────────────────────────
+// Flat-shaded triangle grid over [x0,x1]×[z0,z1]. Each triangle gets one colour from colorAt().
+function buildGrid({ x0, x1, z0, z1, cell, skipCell, height, colorAt }) {
+  const nx = Math.round((x1 - x0) / cell), nz = Math.round((z1 - z0) / cell);
+  const H = new Float32Array((nx + 1) * (nz + 1));            // heights computed once per vertex
+  for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) H[i * (nz + 1) + j] = height(x0 + i * cell, z0 + j * cell);
+  const h = (i, j) => H[i * (nz + 1) + j];
   const pos = [], col = [];
   const c = new THREE.Color();
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      const x0 = -half + i * cell, z0 = -half + j * cell, x1 = x0 + cell, z1 = z0 + cell;
-      if (skipCell && skipCell(x0 + cell / 2, z0 + cell / 2)) continue;
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < nz; j++) {
+      const ax = x0 + i * cell, az = z0 + j * cell, bx = ax + cell, bz = az + cell;
+      if (skipCell && skipCell(ax + cell / 2, az + cell / 2)) continue;
       const tris = [
-        [[x0, z0], [x0, z1], [x1, z1]],
-        [[x0, z0], [x1, z1], [x1, z0]],
+        [[ax, az, h(i, j)], [ax, bz, h(i, j + 1)], [bx, bz, h(i + 1, j + 1)]],
+        [[ax, az, h(i, j)], [bx, bz, h(i + 1, j + 1)], [bx, az, h(i + 1, j)]],
       ];
       for (const tri of tris) {
         let cx = 0, cy = 0, cz = 0;
-        for (const [x, z] of tri) {
-          const y = height(x, z);
-          pos.push(x, y, z);
-          cx += x / 3; cy += y / 3; cz += z / 3;
-        }
+        for (const [x, z, y] of tri) { pos.push(x, y, z); cx += x / 3; cy += y / 3; cz += z / 3; }
         colorAt(c, cx, cy, cz);
         for (let k = 0; k < 3; k++) col.push(c.r, c.g, c.b);
       }
@@ -182,15 +304,14 @@ function buildGrid({ size, cell, skipCell, height, colorAt }) {
   return geo;
 }
 
+// ───────────────────────── Hills ─────────────────────────
 const groundMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
-
-// Surrounding hills (a ring of terrain with the site square cut out)
 const hillLight = new THREE.Color(COLORS.hillLight);
 const hillDark = new THREE.Color(COLORS.hillDark);
-const laterite = new THREE.Color(COLORS.laterite);
+const laterite = new THREE.Color(COLORS.surface);   // the red band blends into the site's surface soil
 const hills = new THREE.Mesh(
   buildGrid({
-    size: WORLD_SIZE, cell: CELL,
+    x0: -WORLD_SIZE / 2, x1: WORLD_SIZE / 2, z0: -WORLD_SIZE / 2, z1: WORLD_SIZE / 2, cell: CELL,
     skipCell: (x, z) => Math.abs(x) < SITE_HALF && Math.abs(z) < SITE_HALF,
     height: heightAt,
     colorAt(c, x, y, z) {
@@ -206,47 +327,69 @@ hills.receiveShadow = true;
 hills.castShadow = true;
 scene.add(hills);
 
-// The empty mine site: warm reddish laterite soil
-const lateriteLight = new THREE.Color(COLORS.lateriteLight);
+// ───────────────────────── Site ground + pit (soil-layer material) ─────────────────────────
+// The colour comes from the height of each pixel, so the pit walls show clean horizontal
+// stripes like a slice of cake. Vertex colour (grey) only adds a little light/dark variation.
+function makeSoilMaterial() {
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+  const uniforms = {
+    uSurface: { value: new THREE.Color(COLORS.surface) },
+    uTopsoil: { value: new THREE.Color(COLORS.topsoil) },
+    uClay:    { value: new THREE.Color(COLORS.clay) },
+    uSand:    { value: new THREE.Color(COLORS.sand) },
+    uRock:    { value: new THREE.Color(COLORS.rock) },
+  };
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = 'varying float vWorldY;\nvarying float vUp;\n' + shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `#include <begin_vertex>
+  vWorldY = (modelMatrix * vec4(transformed, 1.0)).y;
+  vUp = normalize(mat3(modelMatrix) * objectNormal).y;`);
+    shader.fragmentShader = `
+      uniform vec3 uSurface, uTopsoil, uClay, uSand, uRock;
+      varying float vWorldY;
+      varying float vUp;
+      vec3 soilBand(float y) {
+        if (y > -0.6) return uSurface;
+        if (y > ${LAYER_TOPSOIL.toFixed(1)}) return uTopsoil;
+        if (y > ${LAYER_CLAY.toFixed(1)}) return uClay;
+        if (y > ${LAYER_SAND.toFixed(1)}) return uSand;
+        return uRock;
+      }
+    ` + shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      // steep faces (walls) are a little darker so each step stands out
+      'diffuseColor.rgb = soilBand(vWorldY) * vColor.r * mix(0.8, 1.0, smoothstep(0.35, 0.9, vUp));');
+  };
+  return mat;
+}
+const soilMat = makeSoilMaterial();
+const soilShade = (c, x, y, z) => c.setScalar(0.94 + 0.05 * waves(x * 2.3, z * 2.3) + (soilRand() - 0.5) * 0.05);
+
+// Flat site ground around the pit (coarse cells)
 const site = new THREE.Mesh(
   buildGrid({
-    size: SITE_HALF * 2, cell: 20,
+    x0: -SITE_HALF, x1: SITE_HALF, z0: -SITE_HALF, z1: SITE_HALF, cell: 20,
+    skipCell: (x, z) => x > PIT_BOX.x0 && x < PIT_BOX.x1 && z > PIT_BOX.z0 && z < PIT_BOX.z1,
     height: () => 0,
-    colorAt(c) { c.copy(laterite).lerp(lateriteLight, rand()); },
+    colorAt: soilShade,
   }),
-  groundMat
+  soilMat
 );
 site.receiveShadow = true;
 site.name = 'siteGround';
 scene.add(site);
 
-// ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
-const puffs = [];
-for (let k = 0; k < 12; k++) {
-  const angle = rand() * Math.PI * 2, r = 350 + rand() * 900;
-  const cx = Math.cos(angle) * r, cz = Math.sin(angle) * r, cy = 170 + rand() * 110;
-  const count = 3 + Math.floor(rand() * 3);
-  for (let p = 0; p < count; p++) {
-    puffs.push({
-      x: cx + (p - count / 2) * 22 + rand() * 10,
-      y: cy + rand() * 8,
-      z: cz + (rand() - 0.5) * 20,
-      s: 18 + rand() * 16,
-    });
-  }
-}
-const clouds = new THREE.InstancedMesh(
-  new THREE.IcosahedronGeometry(1, 0),
-  new THREE.MeshLambertMaterial({ color: COLORS.cloud, flatShading: true, emissive: 0xffffff, emissiveIntensity: 0.25 }),
-  puffs.length
+// The pit itself (fine cells): terraces, soil-layer walls and the ramp cut into them
+const pit = new THREE.Mesh(
+  buildGrid({ ...PIT_BOX, cell: PIT_CELL, height: groundH, colorAt: soilShade }),
+  soilMat
 );
-const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
-puffs.forEach((p, i) => {
-  q.setFromEuler(e.set(rand() * 3, rand() * 3, rand() * 3));
-  m.compose(new THREE.Vector3(p.x, p.y, p.z), q, new THREE.Vector3(p.s, p.s * 0.6, p.s * 0.85));
-  clouds.setMatrixAt(i, m);
-});
-scene.add(clouds);
+pit.receiveShadow = true;
+pit.castShadow = true;
+pit.name = 'pitWalls';
+scene.add(pit);
 
 // ───────────────────────── Shape helpers (merge simple shapes into one mesh) ─────────────────────────
 // part(): one coloured shape placed in local space. mergeParts(): bake many parts into one geometry.
@@ -279,6 +422,254 @@ function mergeParts(parts) {
   geo.computeVertexNormals();   // non-indexed → flat facets
   return geo;
 }
+const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+const cyl = (rt, rb, h, seg = 8) => new THREE.CylinderGeometry(rt, rb, h, seg);
+const propMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+
+function addProp(name, parts, x, y, z, rotY = 0) {
+  const mesh = new THREE.Mesh(mergeParts(parts), propMat);
+  mesh.position.set(x, y, z);
+  mesh.rotation.y = rotY;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.name = name;
+  scene.add(mesh);
+  return mesh;
+}
+
+// ───────────────────────── Roads (flat ribbons laid on the ground) ─────────────────────────
+// Ribbon along a path: pts carry their own height; lift keeps it just above the ground.
+function buildRibbon(pts, hw, lift, closed = false) {
+  const pos = [];
+  const n = pts.length, segs = closed ? n : n - 1;
+  const edge = (i) => {
+    const p = pts[i % n], L = leftAt(pts, i % n, closed);
+    return [[p.x + L.x * hw, p.y + lift, p.z + L.z * hw], [p.x - L.x * hw, p.y + lift, p.z - L.z * hw]];
+  };
+  for (let i = 0; i < segs; i++) {
+    const [a0, b0] = edge(i), [a1, b1] = edge(i + 1);
+    pos.push(...a0, ...b0, ...b1, ...a0, ...b1, ...a1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+const flatMat = (color, offset) => new THREE.MeshLambertMaterial({
+  color, flatShading: true, polygonOffset: true, polygonOffsetFactor: -offset, polygonOffsetUnits: -4 * offset,
+});
+const roadMat = flatMat(COLORS.road, 1);
+const laneMat = flatMat(COLORS.lane, 2);
+
+// Haul road: pit floor → ramp → rim → dump area
+const haulRoad = new THREE.Mesh(buildRibbon(roadPts, ROAD_HW, 0.12), roadMat);
+haulRoad.receiveShadow = true;
+haulRoad.name = 'haulRoad';
+scene.add(haulRoad);
+
+// Dump area: a flat, levelled zone on the rim where the soil pile will grow
+const dumpArea = new THREE.Mesh(new THREE.CircleGeometry(DUMP.r, 24).rotateX(-Math.PI / 2), roadMat);
+dumpArea.position.set(DUMP.x, 0.12, DUMP.z);
+dumpArea.receiveShadow = true;
+dumpArea.name = 'dumpArea';
+scene.add(dumpArea);
+
+// Berms: low dirt banks along the outer (drop-off) edge of the ramp
+{
+  const pos = [];
+  let prev = null;
+  for (let i = ROAD_FOOT; i <= ROAD_TOP; i++) {
+    const p = roadPts[i], L = leftAt(roadPts, i);
+    const probe = ROAD_HW + 5;
+    const gl = groundH(p.x + L.x * probe, p.z + L.z * probe);
+    const gr = groundH(p.x - L.x * probe, p.z - L.z * probe);
+    const side = gl < gr ? 1 : -1;
+    let cur = null;
+    if (Math.min(gl, gr) < p.y - BERM_HEIGHT) {
+      const at = (off, up) => [p.x + L.x * side * off, p.y + up, p.z + L.z * side * off];
+      cur = { side, inner: at(ROAD_HW - 3, 0), top: at(ROAD_HW - 1.5, BERM_HEIGHT), outer: at(ROAD_HW, 0) };
+    }
+    if (cur && prev && prev.side === cur.side) {
+      pos.push(...prev.inner, ...prev.top, ...cur.top, ...prev.inner, ...cur.top, ...cur.inner);
+      pos.push(...prev.top, ...prev.outer, ...cur.outer, ...prev.top, ...cur.outer, ...cur.top);
+    }
+    prev = cur;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  const berms = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: COLORS.topsoil, flatShading: true, side: THREE.DoubleSide }));
+  berms.castShadow = true;
+  berms.receiveShadow = true;
+  berms.name = 'berms';
+  scene.add(berms);
+}
+
+// Service lane: a narrow loop around the dump area for the small pickup.
+// The pickup will drive it with increasing angle, so on the west side it heads north across the haul road.
+const lanePts = [];
+for (let k = 0; k < 144; k++) {
+  const a = (k / 144) * Math.PI * 2;
+  lanePts.push(new THREE.Vector3(SERVICE_LANE.cx + Math.cos(a) * SERVICE_LANE.r, 0, SERVICE_LANE.cz + Math.sin(a) * SERVICE_LANE.r));
+}
+const serviceLane = new THREE.Mesh(buildRibbon(lanePts, SERVICE_LANE.hw, 0.2, true), laneMat);
+serviceLane.receiveShadow = true;
+serviceLane.name = 'serviceLane';
+scene.add(serviceLane);
+
+// Where the pickup must stop: the last lane point before it reaches the haul road (coming from the south)
+let LANE_STOP = 72;                                   // index 72 = angle π (west side)
+while (nearestOnPath(roadPts, lanePts[LANE_STOP + 1].x, lanePts[LANE_STOP + 1].z).d > ROAD_HW + 4) LANE_STOP++;
+
+// ───────────────────────── Signs (text drawn on a canvas in code) ─────────────────────────
+const SIGN_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+function canvasTexture(w, h, draw) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  draw(cv.getContext('2d'), w, h);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+function makeSign(name, { width, height, post, texture }, x, z, faceX, faceZ) {
+  const group = new THREE.Group();
+  const back = new THREE.MeshLambertMaterial({ color: 0x9a9a9a });
+  const front = new THREE.MeshLambertMaterial({ map: texture, emissive: 0xffffff, emissiveMap: texture, emissiveIntensity: 0.35 });
+  const pole = new THREE.Mesh(cyl(0.1, 0.1, post + height * 0.9, 6), new THREE.MeshLambertMaterial({ color: COLORS.steel }));
+  pole.position.y = (post + height * 0.9) / 2;
+  const board = new THREE.Mesh(box(width, height, 0.12), [back, back, back, back, front, back]);
+  board.position.set(0, post + height / 2, 0.12);
+  pole.castShadow = board.castShadow = true;
+  group.add(pole, board);
+  group.position.set(x, groundAt(x, z), z);
+  group.rotation.y = Math.atan2(faceX, faceZ);      // board front (+z) faces this direction
+  group.name = name;
+  scene.add(group);
+  return group;
+}
+
+// "WAIT HERE" queue sign, ~40 m back up the road from the loading pad, on the inbound (left) side
+const QUEUE_INDEX = Math.round((QUEUE_BACK - Math.hypot(LOADING_PAD.x - roadPts[0].x, LOADING_PAD.z - roadPts[0].z)) / ROAD_STEP);
+{
+  const p = roadPts[QUEUE_INDEX], L = leftAt(roadPts, QUEUE_INDEX);
+  // Trucks heading to the pad travel toward lower indices, so their left is -L; the sign faces up-road (+tangent).
+  makeSign('queueSign', {
+    width: 3.2, height: 1.6, post: 2.6,
+    texture: canvasTexture(512, 256, (ctx, w, h) => {
+      ctx.fillStyle = '#F5B400'; ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = '#2B2B2B'; ctx.lineWidth = 14; ctx.strokeRect(14, 14, w - 28, h - 28);
+      ctx.fillStyle = '#2B2B2B'; ctx.font = `bold 104px ${SIGN_FONT}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('WAIT HERE', w / 2, h / 2 + 4, w - 70);
+    }),
+  }, p.x - L.x * (ROAD_HW + 2), p.z - L.z * (ROAD_HW + 2), L.tx, L.tz);
+}
+
+// "STOP — big trucks first" at the crossing, on the pickup's left, plus a white stop line on the lane
+{
+  const p = lanePts[LANE_STOP], L = leftAt(lanePts, LANE_STOP, true);
+  makeSign('crossingSign', {
+    width: 2.4, height: 3.2, post: 2.2,
+    texture: canvasTexture(384, 512, (ctx, w, h) => {
+      ctx.fillStyle = '#F4F4F4'; ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#D7261E'; ctx.beginPath();
+      for (let k = 0; k < 8; k++) {
+        const a = Math.PI / 8 + k * Math.PI / 4;
+        ctx.lineTo(w / 2 + Math.cos(a) * 150, 170 + Math.sin(a) * 150);
+      }
+      ctx.closePath(); ctx.fill();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#FFFFFF'; ctx.font = `bold 100px ${SIGN_FONT}`;
+      ctx.fillText('STOP', w / 2, 174, 250);
+      ctx.fillStyle = '#2B2B2B'; ctx.font = `bold 56px ${SIGN_FONT}`;
+      ctx.fillText('BIG TRUCKS', w / 2, 392, w - 30);
+      ctx.fillText('FIRST', w / 2, 456, w - 30);
+    }),
+  }, p.x + L.x * (SERVICE_LANE.hw + 2.5), p.z + L.z * (SERVICE_LANE.hw + 2.5), -L.tx, -L.tz);
+
+  const stopLine = new THREE.Mesh(box(SERVICE_LANE.hw * 2, 0.05, 0.6), flatMat(0xffffff, 3));
+  stopLine.position.set(p.x, 0.24, p.z);
+  stopLine.rotation.y = Math.atan2(L.tx, L.tz);
+  stopLine.name = 'stopLine';
+  scene.add(stopLine);
+}
+
+// ───────────────────────── Loading pad, site office, water tower ─────────────────────────
+// Loading pad on the pit floor: light pad with a yellow border
+{
+  const { w, d } = LOADING_PAD, t = 0.6;
+  addProp('loadingPad', [
+    part(box(w, 0.2, d), COLORS.padGrey, { at: [0, 0.1, 0] }),
+    part(box(w, 0.26, t), COLORS.yellow, { at: [0, 0.13, -d / 2 + t / 2] }),
+    part(box(w, 0.26, t), COLORS.yellow, { at: [0, 0.13, d / 2 - t / 2] }),
+    part(box(t, 0.26, d), COLORS.yellow, { at: [-w / 2 + t / 2, 0.13, 0] }),
+    part(box(t, 0.26, d), COLORS.yellow, { at: [w / 2 - t / 2, 0.13, 0] }),
+  ], LOADING_PAD.x, FLOOR_Y, LOADING_PAD.z).castShadow = false;
+}
+
+// Site office: a small white cabin with windows, a door, steps and a flagpole (door faces the lane, -z)
+addProp('siteOffice', [
+  part(box(12.4, 0.4, 4.4), COLORS.steel, { at: [0, 0.2, 0] }),
+  part(box(12, 3, 4), COLORS.white, { at: [0, 1.9, 0] }),
+  part(box(12.6, 0.3, 4.6), 0xBFBFBF, { at: [0, 3.55, 0] }),
+  part(box(1, 2.1, 0.1), 0x4A5560, { at: [-3.5, 1.45, -2.02] }),
+  part(box(1.4, 0.4, 1), COLORS.steel, { at: [-3.5, 0.2, -2.7] }),
+  part(box(1.8, 1, 0.1), COLORS.glass, { at: [0, 2.2, -2.02] }),
+  part(box(1.8, 1, 0.1), COLORS.glass, { at: [3.5, 2.2, -2.02] }),
+  part(box(1.8, 1, 0.1), COLORS.glass, { at: [0, 2.2, 2.02] }),
+  part(box(1.8, 1, 0.1), COLORS.glass, { at: [-3.5, 2.2, 2.02] }),
+  part(cyl(0.08, 0.1, 9, 6), 0xDADADA, { at: [8, 4.5, 0] }),
+  part(box(2, 1.3, 0.05), COLORS.yellow, { at: [9.05, 8.2, 0] }),
+], OFFICE.x, 0, OFFICE.z);
+
+// Water tower: steel legs with braces, a white tank, a roof cone and a filling spout toward the road (+z)
+{
+  const legs = [], s = 2.4, H = 9;
+  for (const [lx, lz] of [[-s, -s], [s, -s], [-s, s], [s, s]]) legs.push(part(cyl(0.25, 0.25, H, 6), COLORS.steel, { at: [lx, H / 2, lz] }));
+  for (const y of [3, 6.5]) {
+    legs.push(part(box(2 * s, 0.2, 0.2), COLORS.steel, { at: [0, y, -s] }));
+    legs.push(part(box(2 * s, 0.2, 0.2), COLORS.steel, { at: [0, y, s] }));
+    legs.push(part(box(0.2, 0.2, 2 * s), COLORS.steel, { at: [-s, y, 0] }));
+    legs.push(part(box(0.2, 0.2, 2 * s), COLORS.steel, { at: [s, y, 0] }));
+  }
+  addProp('waterTower', [
+    ...legs,
+    part(box(2 * s + 0.6, 0.4, 2 * s + 0.6), COLORS.steel, { at: [0, H, 0] }),
+    part(cyl(3.4, 3.4, 4.4, 12), COLORS.white, { at: [0, H + 2.4, 0] }),
+    part(new THREE.ConeGeometry(3.6, 1.4, 12), 0xBFBFBF, { at: [0, H + 5.3, 0] }),
+    part(box(0.4, 0.4, 6), COLORS.steel, { at: [0, H - 0.4, 6.2] }),
+    part(cyl(0.25, 0.25, 2, 6), COLORS.steel, { at: [0, H - 1.4, 9] }),
+  ], WATER_TOWER.x, 0, WATER_TOWER.z);
+}
+
+// ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
+const puffs = [];
+for (let k = 0; k < 12; k++) {
+  const angle = cloudRand() * Math.PI * 2, r = 350 + cloudRand() * 900;
+  const cx = Math.cos(angle) * r, cz = Math.sin(angle) * r, cy = 170 + cloudRand() * 110;
+  const count = 3 + Math.floor(cloudRand() * 3);
+  for (let p = 0; p < count; p++) {
+    puffs.push({
+      x: cx + (p - count / 2) * 22 + cloudRand() * 10,
+      y: cy + cloudRand() * 8,
+      z: cz + (cloudRand() - 0.5) * 20,
+      s: 18 + cloudRand() * 16,
+    });
+  }
+}
+const clouds = new THREE.InstancedMesh(
+  new THREE.IcosahedronGeometry(1, 0),
+  new THREE.MeshLambertMaterial({ color: COLORS.cloud, flatShading: true, emissive: 0xffffff, emissiveIntensity: 0.25 }),
+  puffs.length
+);
+const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+puffs.forEach((p, i) => {
+  q.setFromEuler(e.set(cloudRand() * 3, cloudRand() * 3, cloudRand() * 3));
+  m.compose(new THREE.Vector3(p.x, p.y, p.z), q, new THREE.Vector3(p.s, p.s * 0.6, p.s * 0.85));
+  clouds.setMatrixAt(i, m);
+});
+scene.add(clouds);
 
 // ───────────────────────── Tropical trees on the hills (one instanced mesh) ─────────────────────────
 // Canopy vertices are white so the per-tree instance colour (one of the two greens) shows through;
@@ -296,14 +687,14 @@ const trees = new THREE.InstancedMesh(
   TREE_COUNT
 );
 for (let i = 0; i < TREE_COUNT; ) {
-  const x = (rand() - 0.5) * 1300, z = (rand() - 0.5) * 1300;
+  const x = (treeRand() - 0.5) * 1300, z = (treeRand() - 0.5) * 1300;
   const d = Math.hypot(Math.max(Math.abs(x) - SITE_HALF, 0), Math.max(Math.abs(z) - SITE_HALF, 0));
   if (d < 45 || d > 450) continue;          // hills only: never on the site or its red edge band
-  const s = 0.8 + rand() * 0.6;
-  q.setFromEuler(e.set(0, rand() * Math.PI * 2, 0));
+  const s = 0.8 + treeRand() * 0.6;
+  q.setFromEuler(e.set(0, treeRand() * Math.PI * 2, 0));
   m.compose(new THREE.Vector3(x, heightAt(x, z) - 0.8, z), q, new THREE.Vector3(s, s, s));
   trees.setMatrixAt(i, m);
-  trees.setColorAt(i, rand() < 0.5 ? hillLight : hillDark);
+  trees.setColorAt(i, treeRand() < 0.5 ? hillLight : hillDark);
   i++;
 }
 trees.castShadow = true;
@@ -317,10 +708,10 @@ function limitCamera() {
   prevTarget.copy(controls.target);
   controls.target.x = clamp(controls.target.x, -260, 260);
   controls.target.z = clamp(controls.target.z, -260, 260);
-  controls.target.y = clamp(controls.target.y, 0, 30);
+  controls.target.y = clamp(controls.target.y, FLOOR_Y, 30);
   camera.position.add(prevTarget.subVectors(controls.target, prevTarget));
-  // never dip into the ground or the hills
-  const minY = heightAt(camera.position.x, camera.position.z) + 5;
+  // never dip into the ground, the pit walls or the hills
+  const minY = groundAt(camera.position.x, camera.position.z) + 5;
   if (camera.position.y < minY) camera.position.y = minY;
 }
 
