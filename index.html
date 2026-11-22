@@ -116,7 +116,7 @@ const COAL_YARD = { pad: { x: 132, z: -104, r: 18 }, crusher: { x: 162, z: -93 }
 const WASTE_DUMP = { cx: 166, cz: 76, hw: 24, h: 7, slope: 8, rampX: 174, rampZ0: -8 };
 const SERVICE_LANE = { cx: 148, cz: -122, r: 46, hw: 3 };  // loop around the coal yard, crosses the coal branch once
 const OFFICE = { x: 148, z: -176 };   // just outside the service-lane loop, door facing the lane; the pickup stops here
-const WATER_TOWER = { x: 30, z: -94 };
+const WATER_TOWER = { x: 70, z: -110 };  // on the rim beside the ramp top, inside the water truck's turning loop
 
 // Small seeded random so the world looks the same on every load
 function makeRandom(seed) {
@@ -1089,7 +1089,6 @@ placeMachine(digger, 16, 2, 1, 0);                 // pit floor between the pad 
 const haulers = [makeMegaHauler('megaHauler1'), makeMegaHauler('megaHauler2')];
 haulers.forEach((h) => scene.add(h));             // both drive the loop; their poses are set by the route code
 const waterTruck = makeWaterTruck();
-placeMachine(waterTruck, 30, -85, 1, 0);           // under the water tower spout, off the road
 const flagPickup = makeFlagPickup();
 {
   const p = lanePts[SERVICE_LANE_START], L = leftAt(lanePts, SERVICE_LANE_START, true);
@@ -1130,7 +1129,7 @@ const onLoadingPad = (x, z) => Math.abs(x - LOADING_PAD.x) < LOADING_PAD.w / 2 &
 // One leg: smooth curve sampled every ~1 m with height, heading, tilt and a speed limit per sample.
 // `before` / `after` are the neighbouring points just outside the leg; they set its heading at each end
 // (by default the curve carries straight on), so the truck never snaps round at a stop.
-function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before, after } = {}) {
+function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before, after, go = false } = {}) {
   // holds / releases are added after the leg is built (see ZONES)
   const mirror = (p, q) => [2 * p[0] - q[0], 2 * p[1] - q[1]];
   const all = [before ?? mirror(ctrl[0], ctrl[1]), ...ctrl, after ?? mirror(ctrl.at(-1), ctrl.at(-2))];
@@ -1160,9 +1159,11 @@ function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before
     if (Math.abs(y[at(i + 3)] - y[at(i - 3)]) > 6 * step * 0.03) v = Math.min(v, V_SLOPE);
     vmax.push(reverse ? V_REV : v);
   });
-  // brake smoothly to a stop at the end of the leg
-  vmax[n] = 0.4;
-  for (let i = n - 1; i >= 0; i--) vmax[i] = Math.min(vmax[i], Math.sqrt(vmax[i + 1] ** 2 + 2 * DEC * step));
+  // brake smoothly to a stop at the end of the leg (unless it runs straight on into the next one)
+  if (!go) {
+    vmax[n] = 0.4;
+    for (let i = n - 1; i >= 0; i--) vmax[i] = Math.min(vmax[i], Math.sqrt(vmax[i + 1] ** 2 + 2 * DEC * step));
+  }
   return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause, action, holds: [], releases: [] };
 }
 
@@ -1443,7 +1444,7 @@ function makeDriver(truck, seed) {
   truck.rotation.order = 'YZX';           // turn (y) after tilting along its length (z)
   addLoadHeap(truck, seed);
   addBeep(truck);
-  return { truck, route: ROUTES.rock, leg: ROUTES.rock.length - 1, s: ontoPad.len, v: 0, wait: 0, task: null,
+  return { truck, halfLen: 7.25, route: ROUTES.rock, leg: ROUTES.rock.length - 1, s: ontoPad.len, v: 0, wait: 0, task: null,
     load: 'rock', loaded: false, tipT: 0, blend: 0, from: null, beepT: 0 };
 }
 
@@ -1558,7 +1559,6 @@ const coalCross = lanePts[LANE_CROSS];
   fromCoal.releases.push({ zone: 'coalPad', s: sAt(fromCoal, coalCross.x, coalCross.z) + 7.25 + SERVICE_LANE.hw + 3 });
 }
 const FOLLOW_GAP = 25;                    // metres kept clear in front of a truck, to the next truck in its lane
-const TRUCK_LEN = 14.5;
 
 // Speed limit from the zones ahead of this truck and from any truck in front of it in the same lane
 // (d.stopAt is a hard limit: a truck never rolls past a hold point while that zone is taken)
@@ -1572,12 +1572,12 @@ function trafficLimit(d, leg) {
   }
   const dir = leg.reverse ? -1 : 1, yaw = d.truck.rotation.y;
   const fx = Math.cos(yaw) * dir, fz = -Math.sin(yaw) * dir;                  // the way this truck is moving
-  for (const o of drivers) {
-    if (o === d || Math.abs(angleDiff(o.truck.rotation.y, yaw)) > 1) continue;   // only trucks facing our way (same lane)
+  for (const o of traffic) {
+    if (o === d || Math.abs(angleDiff(o.truck.rotation.y, yaw)) > 1) continue;   // only vehicles facing our way (same lane)
     const dx = o.truck.position.x - d.truck.position.x, dz = o.truck.position.z - d.truck.position.z;
     const ahead = dx * fx + dz * fz, side = Math.abs(dx * fz - dz * fx);
     if (ahead <= 0 || ahead > 80 || side > 5 || Math.abs(o.truck.position.y - d.truck.position.y) > 4) continue;
-    limit = Math.min(limit, Math.sqrt(2 * DEC * Math.max(ahead - TRUCK_LEN - FOLLOW_GAP, 0)));
+    limit = Math.min(limit, Math.sqrt(2 * DEC * Math.max(ahead - d.halfLen - o.halfLen - FOLLOW_GAP, 0)));
   }
   return limit;
 }
@@ -1652,12 +1652,249 @@ function updatePickup(dt) {
   flagPickup.userData.flagLight.material.emissiveIntensity = (p.blinkT % PICKUP.blink) < PICKUP.blink / 2 ? 1.6 : 0.05;
 }
 
+// ───────────────────────── Water truck: up and down the ramp, big trucks first ─────────────────────────
+// One loop: stop line on the rim → across into the downhill lane → down the ramp → off the road into a
+// turning loop in the empty south-west corner of the pit floor → stop line → across into the uphill lane →
+// up the ramp → off the road into the rim loop round the water tower (refill under the spout every few
+// laps) → stop line. Both turning loops are off the road, so the haulers simply drive past it there.
+// It never goes near the loading pad, its approach, WAIT HERE, the dump top, the coal pad or the crossing.
+const WATER = { v: 5, halfLen: 6, clear: 60, clearT: 18, minStop: 1.5 * TIME_SCALE,
+  refillEvery: 3, refillT: 6 * TIME_SCALE, wheelR: 0.55 };
+const PIT_LOOP = { cx: -50, cz: -5, R: 11 };                     // pit floor, south-west corner
+const RIM_LOOP = { cx: WATER_TOWER.x, cz: WATER_TOWER.z + 19, R: 10 };   // rim, beside the ramp top
+const SPOUT = [RIM_LOOP.cx, RIM_LOOP.cz - RIM_LOOP.R];          // under the tower's spout
+// Stop line on a line heading +z (north toward the road): the front bumper stops 2 m outside the road edge
+function stopLineZ(x, z) {
+  while (distToRoads(x, z + WATER.halfLen) > ROAD_HW + 2) z += 0.25;
+  return z;
+}
+const W_EAST_X = RIM_LOOP.cx - RIM_LOOP.R, W_PIT_X = PIT_LOOP.cx - PIT_LOOP.R;
+const W_EAST_STOP = [W_EAST_X, stopLineZ(W_EAST_X, RIM_LOOP.cz)];
+const W_PIT_STOP = [W_PIT_X, stopLineZ(W_PIT_X, PIT_LOOP.cz)];
+const W_EAST_CROSS = roadPts[nearestSample(roadPts, W_EAST_X, -64)];
+const W_PIT_CROSS = roadPts[nearestSample(roadPts, W_PIT_X, 30)];
+const WATER_LEGS = (() => {
+  const iE = nearestSample(roadPts, 48, -64), iA = nearestSample(roadPts, 38, -65);   // join / leave the lanes on the rim
+  const iP = nearestSample(roadPts, -73, 28), iU = nearestSample(roadPts, -72, 29);    // leave / join the lanes on the pit side
+  const down = lanePoints(roadPts, iE, iP), up = lanePoints(roadPts, iU, iA);
+  const loopTop = (L) => [L.cx, L.cz + L.R];
+  const dPit = [W_PIT_X, W_PIT_STOP[1] + 8], dEast = [W_EAST_X, W_EAST_STOP[1] + 7];
+  const legs = {
+    down: makeLeg('wDown', [W_EAST_STOP, dEast, ...easeJoin(dEast, [0, 1], down[0], dirOf(down[0], down[1]), 10), ...down,
+      ...easeJoin(down.at(-1), dirOf(down.at(-2), down.at(-1)), loopTop(PIT_LOOP), [1, 0], 10),
+      ...arcPoints(PIT_LOOP.cx, PIT_LOOP.cz, PIT_LOOP.R, Math.PI / 2, -Math.PI, 24), W_PIT_STOP],
+      { before: [W_EAST_X, W_EAST_STOP[1] - 4], after: dPit }),
+    up: makeLeg('wUp', [W_PIT_STOP, dPit, ...easeJoin(dPit, [0, 1], up[0], dirOf(up[0], up[1]), 10), ...up,
+      ...easeJoin(up.at(-1), dirOf(up.at(-2), up.at(-1)), loopTop(RIM_LOOP), [1, 0], 10),
+      ...arcPoints(RIM_LOOP.cx, RIM_LOOP.cz, RIM_LOOP.R, Math.PI / 2, -Math.PI / 2, 12)],
+      { go: true, before: [W_PIT_X, W_PIT_STOP[1] - 4], after: [SPOUT[0] - 4, SPOUT[1] + 0.8] }),
+    toLine: makeLeg('wToLine', [SPOUT, ...arcPoints(RIM_LOOP.cx, RIM_LOOP.cz, RIM_LOOP.R, -Math.PI / 2, -Math.PI, 8).slice(1), W_EAST_STOP],
+      { before: [SPOUT[0] + 4, SPOUT[1] + 0.8], after: dEast }),
+  };
+  Object.assign(legs.down, { stop: { kind: 'giveway', at: W_PIT_CROSS }, next: 'up' });
+  Object.assign(legs.up, { stop: { kind: 'refill' }, next: 'toLine' });      // stops under the spout only when a refill is due
+  Object.assign(legs.toLine, { stop: { kind: 'giveway', at: W_EAST_CROSS }, next: 'down' });
+  return legs;
+})();
+waterTruck.rotation.order = 'YZX';
+scene.add(waterTruck);
+// Starts under the spout, half-way through a refill
+const water = { truck: waterTruck, halfLen: WATER.halfLen, leg: WATER_LEGS.up, s: WATER_LEGS.up.len, v: 0,
+  state: 'stopped', t: WATER.refillT / 2, laps: WATER.refillEvery, stopAt: Infinity, sprayS: 0, refills: 0 };
+const traffic = [...drivers, water];
+
+// May the water truck pull out across the road at `P`? No hauler within ~60 m, and none that would
+// reach the crossing before the water truck is across.
+function waterMayCross(P) {
+  return drivers.every((d) => {
+    const leg = d.route[d.leg], dir = leg.reverse ? -1 : 1, yaw = d.truck.rotation.y;
+    const dx = P.x - d.truck.position.x, dz = P.z - d.truck.position.z, dist = Math.hypot(dx, dz);
+    if (dist < WATER.clear) return false;
+    const toward = (dx * Math.cos(yaw) * dir - dz * Math.sin(yaw) * dir) / dist;
+    return !(toward > 0.3 && dist / Math.max(d.v, 2) < WATER.clearT);   // seconds of sim time to get here
+  });
+}
+
+function updateWater(dt) {
+  const w = water, leg = w.leg, stop = leg.stop;
+  if (w.state === 'stopped') {
+    w.t += dt;
+    const done = stop.kind === 'refill' ? w.t >= WATER.refillT : w.t >= WATER.minStop && waterMayCross(stop.at);
+    if (done) {
+      if (stop.kind === 'refill') { w.laps = 0; w.refills++; }
+      w.leg = WATER_LEGS[leg.next]; w.s = 0; w.state = 'drive';
+    }
+  } else {
+    const wantStop = stop.kind !== 'refill' || w.laps >= WATER.refillEvery;
+    const i = Math.min(Math.round(w.s / leg.step), leg.n);
+    let limit = Math.min(leg.vmax[i], WATER.v, trafficLimit(w, leg));
+    if (wantStop) limit = Math.min(limit, Math.sqrt(2 * DEC * Math.max(leg.len - w.s, 0)) + 0.3);
+    w.v = Math.min(w.v + ACC * dt, limit);
+    const ds = Math.max(Math.min(w.v * dt, leg.len - w.s, w.stopAt - w.s), 0);
+    if (ds < w.v * dt) w.v = ds / dt;
+    w.s += ds;
+    w.truck.userData.wheels.forEach((wh) => { wh.rotation.z -= ds / WATER.wheelR; });
+    if (w.s >= leg.len - 1e-6) {
+      if (leg === WATER_LEGS.toLine) w.laps++;                  // one lap = back at the rim stop line
+      if (wantStop) { w.state = 'stopped'; w.t = 0; w.v = 0; }
+      else { w.leg = WATER_LEGS[leg.next]; w.s = 0; }
+    }
+    spray(w, ds);
+  }
+  poseOnLeg(w.truck, w.leg, w.s);
+  w.truck.updateMatrixWorld();
+}
+
+// ───────────────────────── Particles: one pooled system for mist and dust ─────────────────────────
+// Soft round points; each has its own colour, opacity and size. Ages and motion use 1× seconds.
+const PARTICLE_MAX = 300;
+const pPos = new Float32Array(PARTICLE_MAX * 3), pRgba = new Float32Array(PARTICLE_MAX * 4), pSize = new Float32Array(PARTICLE_MAX);
+const pVel = new Float32Array(PARTICLE_MAX * 3), pAge = new Float32Array(PARTICLE_MAX).fill(1), pLife = new Float32Array(PARTICLE_MAX).fill(1);
+const pKind = new Uint8Array(PARTICLE_MAX);
+const PARTICLE_KINDS = [
+  { rgb: [0.95, 0.97, 1.0], alpha: 0.55, size: [0.8, 2.6], life: 0.9, rise: -2.0 },   // 0: water mist (falls)
+  { rgb: [0.55, 0.49, 0.41], alpha: 0.45, size: [1.5, 4.5], life: 2.2, rise: 0.5 },   // 1: dust (drifts up)
+];
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('rgba', new THREE.BufferAttribute(pRgba, 4));
+pGeo.setAttribute('size', new THREE.BufferAttribute(pSize, 1));
+const pMat = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: 500 } }, transparent: true, depthWrite: false,
+  vertexShader: `attribute vec4 rgba; attribute float size; uniform float uScale; varying vec4 vC;
+    void main() { vC = rgba; vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * uScale / -mv.z; gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `varying vec4 vC;
+    void main() { float r = length(gl_PointCoord - 0.5); if (r > 0.5) discard;
+      gl_FragColor = vec4(vC.rgb, vC.a * (1.0 - smoothstep(0.25, 0.5, r))); }`,
+});
+const particles = new THREE.Points(pGeo, pMat);
+particles.frustumCulled = false;
+particles.name = 'particles';
+scene.add(particles);
+const pTmp = new THREE.Vector2();
+particles.onBeforeRender = (r, s, cam) => {   // point size in metres
+  pMat.uniforms.uScale.value = r.getDrawingBufferSize(pTmp).y / (2 * Math.tan(cam.fov * Math.PI / 360));
+};
+let pNext = 0, pAlive = 0, pPeak = 0;
+function spawnParticle(kind, p, vx, vy, vz) {
+  for (let n = 0; n < PARTICLE_MAX; n++) {                      // next free slot; none free → skip (the cap)
+    const k = (pNext + n) % PARTICLE_MAX;
+    if (pAge[k] < pLife[k]) continue;
+    pNext = (k + 1) % PARTICLE_MAX;
+    pKind[k] = kind; pAge[k] = 0; pLife[k] = PARTICLE_KINDS[kind].life * (0.8 + 0.4 * rand());
+    pPos.set([p.x, p.y, p.z], k * 3); pVel.set([vx, vy, vz], k * 3);
+    return;
+  }
+}
+function updateParticles(dt) {
+  const t1 = dt / TIME_SCALE;                                   // 1× seconds
+  pAlive = 0;
+  for (let k = 0; k < PARTICLE_MAX; k++) {
+    if (pAge[k] >= pLife[k]) { pSize[k] = 0; pRgba[k * 4 + 3] = 0; continue; }
+    pAge[k] += t1;
+    const K = PARTICLE_KINDS[pKind[k]], u = Math.min(pAge[k] / pLife[k], 1);
+    pVel[k * 3] *= 1 - 1.5 * t1; pVel[k * 3 + 2] *= 1 - 1.5 * t1;
+    pVel[k * 3 + 1] += K.rise * t1;
+    for (let j = 0; j < 3; j++) pPos[k * 3 + j] += pVel[k * 3 + j] * t1;
+    pSize[k] = lerp(K.size[0], K.size[1], u);
+    pRgba.set([...K.rgb, K.alpha * (1 - u)], k * 4);
+    pAlive++;
+  }
+  pPeak = Math.max(pPeak, pAlive);
+  for (const a of ['position', 'rgba', 'size']) pGeo.attributes[a].needsUpdate = true;
+}
+
+// ───────────────────────── Wet strip: darker road behind the water truck, drying over ~30 s ─────────────────────────
+const WET = { max: 260, step: 3, hw: 4, life: 30, alpha: 0.6 };
+const wetPts = [];                                              // { x, y, z, px, pz, t, seg }
+let wetSeg = 0, mineT = 0;
+const wetPos = new Float32Array(WET.max * 18), wetCol = new Float32Array(WET.max * 24), wetNor = new Float32Array(WET.max * 18);
+for (let k = 0; k < WET.max * 6; k++) wetNor[k * 3 + 1] = 1;
+const wetGeo = new THREE.BufferGeometry();
+wetGeo.setAttribute('position', new THREE.BufferAttribute(wetPos, 3));
+wetGeo.setAttribute('normal', new THREE.BufferAttribute(wetNor, 3));
+wetGeo.setAttribute('color', new THREE.BufferAttribute(wetCol, 4));
+const wetMesh = new THREE.Mesh(wetGeo, new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, depthWrite: false,
+  polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -12 }));
+wetMesh.frustumCulled = false;
+wetMesh.receiveShadow = true;
+wetMesh.name = 'wetStrip';
+scene.add(wetMesh);
+const wetness = (s) => Math.max(1 - (mineT - s.t) / TIME_SCALE / WET.life, 0);
+const isWet = (x, z) => wetPts.some((s) => wetness(s) > 0.2 && (s.x - x) ** 2 + (s.z - z) ** 2 < WET.hw ** 2);
+const NOZZLES = [-1.1, -0.4, 0.4, 1.1];
+const sprayAt = new THREE.Vector3();
+let spraying = false;
+function spray(w, ds) {
+  const T = w.truck, on = ds > 0 && distToRoads(T.position.x, T.position.z) < ROAD_HW + 1;
+  if (!on) { if (spraying) wetSeg++; spraying = false; return; }
+  spraying = true;
+  w.sprayS += ds;
+  const yaw = T.rotation.y, fx = Math.cos(yaw), fz = -Math.sin(yaw);
+  // mist from the spray bar: a fan behind and to the sides
+  for (let m = Math.floor(w.sprayS / 0.35) - Math.floor((w.sprayS - ds) / 0.35); m > 0; m--) {
+    const zN = NOZZLES[Math.floor(rand() * 4)];
+    sprayAt.set(-6.0, 0.75, zN); T.localToWorld(sprayAt);
+    const side = zN * 2 + (rand() - 0.5) * 2, back = 2 + rand() * 1.5;
+    spawnParticle(0, sprayAt, -fx * back + fz * side, 0.4 + rand() * 0.6, -fz * back - fx * side);
+  }
+  const last = wetPts.at(-1);
+  if (last && last.seg === wetSeg && Math.hypot(last.x - T.position.x, last.z - T.position.z) < WET.step) return;
+  sprayAt.set(-6.0, 0, 0); T.localToWorld(sprayAt);
+  wetPts.push({ x: sprayAt.x, z: sprayAt.z, y: groundAt(sprayAt.x, sprayAt.z) + 0.15, px: -fz, pz: fx, t: mineT, seg: wetSeg });
+  if (wetPts.length > WET.max) wetPts.shift();
+}
+function updateWet() {
+  let q = 0;
+  const v = (s, sign) => [s.x + s.px * WET.hw * sign, s.y, s.z + s.pz * WET.hw * sign];
+  for (let k = 1; k < wetPts.length; k++) {
+    const a = wetPts[k - 1], b = wetPts[k];
+    if (a.seg !== b.seg) continue;
+    const wa = wetness(a), wb = wetness(b);
+    if (wa <= 0 && wb <= 0) continue;
+    wetPos.set([...v(a, 1), ...v(a, -1), ...v(b, -1), ...v(a, 1), ...v(b, -1), ...v(b, 1)], q * 18);
+    const ca = [0.02, 0.02, 0.02, WET.alpha * wa], cb = [0.02, 0.02, 0.02, WET.alpha * wb];
+    wetCol.set([...ca, ...ca, ...cb, ...ca, ...cb, ...cb], q * 24);
+    q++;
+  }
+  wetGeo.setDrawRange(0, q * 6);
+  wetGeo.attributes.position.needsUpdate = wetGeo.attributes.color.needsUpdate = true;
+}
+
+// ───────────────────────── Dust: puffs behind a moving Mega Hauler's rear wheels (not on wet road) ─────────────────────────
+const DUST_EVERY = 2.5;                                         // metres driven per puff, per rear wheel
+const dustAt = new THREE.Vector3();
+let dustPuffs = 0, dustSkippedWet = 0;
+function updateDust(d) {
+  const T = d.truck, p = T.position;
+  const moved = d.lastPos ? Math.hypot(p.x - d.lastPos.x, p.z - d.lastPos.z) : 0;
+  d.lastPos = { x: p.x, z: p.z };
+  if (d.task || d.v < 1.5) return;
+  d.dustS = (d.dustS ?? 0) + moved;
+  if (d.dustS < DUST_EVERY) return;
+  d.dustS -= DUST_EVERY;
+  T.updateMatrixWorld();
+  const back = d.route[d.leg].reverse ? -1 : 1, yaw = T.rotation.y, fx = Math.cos(yaw) * back, fz = -Math.sin(yaw) * back;
+  for (const side of [-1, 1]) {
+    dustAt.set(-3.6 * back - 1.6 * back, 0.6, side * 3.85); T.localToWorld(dustAt);
+    if (isWet(dustAt.x, dustAt.z)) { dustSkippedWet++; continue; }
+    dustPuffs++;
+    spawnParticle(1, dustAt, -fx * (1 + rand()) + (rand() - 0.5), 0.3 + rand() * 0.4, -fz * (1 + rand()) + (rand() - 0.5));
+  }
+}
+
 function updateMine(dt) {
+  mineT += dt;
   drivers.forEach((d) => updateTruck(d, dt));
   updateDigger(dt);
   updateSpotter(dt, drivers);
   updatePickup(dt);
+  updateWater(dt);
+  drivers.forEach(updateDust);
   updateFalling(dt);
+  updateParticles(dt);
+  updateWet();
 }
 
 // ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
