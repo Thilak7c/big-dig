@@ -91,7 +91,7 @@ All movement follows fixed paths (splines or waypoint lists). **Nothing ever ove
   - 💧 **Water Truck**: "Coal mines are very dusty. I spray water on the roads so dust doesn't fly into the air."
   - 🦺 **Spotter**: "I'm the spotter! I watch the area around the digger and use my flag and hand signals to tell drivers when it's safe."
   - ⚫ **Coal seam (pit walls)**: "This black stripe is coal! It was made from plants that were buried and squashed for millions of years. Above it is rock we must move first."
-  - ⚫ **Coal stockpile**: "Coal comes here. The crusher breaks it into smaller pieces, and later it's taken away — much of it is burned in power stations to make electricity."
+  - ⚫ **Coal stockpile**: "Trucks tip the coal into a hopper in the ground. The crusher breaks it into small pieces, and a conveyor belt carries it up to the pile. Later it's taken away — much of it is burned in power stations to make electricity."
   - 🪨 **Waste dump**: "This isn't rubbish — it's the rock that was on top of the coal. One day it can be put back and planted with trees."
 - **"Secrets" toggle button** (the headline learning moment): when ON,
   - each Mega Hauler shows its **blind spot**: a semi-transparent red shape on the ground around the front-right side and rear, close to the truck;
@@ -185,6 +185,7 @@ Three live numbers, big and readable:
 - Stage 4b road tweaks: haul road 30 m wide; berms sit on its outer 2.5 m, so 26 m is usable. Trucks keep left, 6.5 m from the centre line (≈3.7 m between two passing trucks). The bend at the foot of the ramp is a 32 m-radius arc; the ramp is 280 m at ~8.6%.
 - Waste dump = a real end-tipping dump: flat top (crest 48 × 48 m, 7 m high) with a 60 m access ramp and a 1.5 m safety berm round the crest. Trucks drive up, turn on top, reverse to the south crest berm and tip over the edge; the dump grows outward from that edge.
 - Coal yard = a hopper pocket set in the ground beside the crusher shed, with a concrete stop wall (the tipping point's safety berm) and apron. Trucks circle the turning pad, then reverse straight up to the wall and tip into the pocket.
-- `TIME_SCALE` (default 3.85): machines move at real speeds, sped up so one Mega Hauler loop takes ~60 s at 1×. All movement and timers use it; the speed buttons multiply it.
+- `TIME_SCALE` (default 4.6): machines move at real speeds, sped up so one rock trip (load, waste dump, back) takes ~60 s at 1×; a coal trip takes ~51 s. All movement and timers use it; the speed buttons multiply it.
+- Stage 5: the Big Digger sits at (16, 2) on the pit floor, between the loading pad and the east wall. Rock scoops come from the top edge of that wall (where the beige overburden starts), coal scoops from the black seam lower down. The truck parks with its cab at the far front-left, so the bucket always swings in over the rear of the body.
 - Signs are drawn larger than real life (~3 m boards) so kids can spot them.
 - Local preview: `python -m http.server 8123` in this folder → http://127.0.0.1:8123/

@@ -94,9 +94,10 @@ const HAUL_ROAD_POINTS = [
 ];
 const RAMP_FOOT_POINT = 1, RAMP_TOP_POINT = 8;
 
-// Simulation speed: machines move at real speeds, sped up by this factor so one Mega Hauler loop
-// takes about a minute. Every movement and timer uses it; the speed buttons will multiply it.
-const TIME_SCALE = 3.85;
+// Simulation speed: machines move at real speeds, sped up by this factor so one Mega Hauler trip
+// (loading, the waste dump and back) takes about a minute. Every movement and timer uses it; the
+// speed buttons will multiply it.
+const TIME_SCALE = 4.6;
 // The two branches start on the trunk just before the junction so the road surfaces join smoothly
 const COAL_ROAD_POINTS  = [[70, -64], [88, -64], [106, -72], [121, -88], [132, -104]];
 // The waste branch swings south, then climbs a straight 60 m ramp onto the top of the waste dump.
@@ -729,9 +730,9 @@ addProp('crusherShed', [
   part(box(10.6, 0.4, 8.6), COLORS.steel, { at: [0, 8.2, 0] }),
   part(box(0.1, 3, 2.6), COLORS.dark, { at: [5.05, 1.5, 2] }),                        // door
   part(box(7.4, 0.3, 9), COLORS.concrete, { at: [-8, 0.15, 0] }),                     // pocket collar
-  part(box(5.6, 0.06, 6.6), COLORS.dark, { at: [-8, 0.32, 0] }),                      // pocket opening
-  part(box(1, 1.2, 10), COLORS.concrete, { at: [-12, 0.6, 0] }),                      // stop wall
-  part(box(0.12, 0.3, 10.02), COLORS.yellow, { at: [-12.5, 0.95, 0] }),               // yellow stripe facing the trucks
+  part(box(6.6, 0.06, 6.6), COLORS.dark, { at: [-8.3, 0.32, 0] }),                    // pocket opening, right behind the wall
+  part(box(1, 1.0, 10), COLORS.concrete, { at: [-12, 0.5, 0] }),                      // stop wall
+  part(box(0.12, 0.3, 10.02), COLORS.yellow, { at: [-12.5, 0.75, 0] }),               // yellow stripe facing the trucks
   part(box(10, 0.12, 12), COLORS.concrete, { at: [-17.5, 0.08, 0] }),                 // tipping apron
 ], COAL_YARD.crusher.x, 0, COAL_YARD.crusher.z);
 
@@ -1071,7 +1072,7 @@ function makeSpotter() {
 // ── Start spots (nothing on a haul-road lane, the pad approach or the crossing) ──
 const SERVICE_LANE_START = (LANE_CROSS + lanePts.length / 2) % lanePts.length;   // far side of the loop from the crossing
 const digger = makeDigger();
-placeMachine(digger, 12, -3, 1, 0);                // pit floor beside the pad, facing the east digging face
+placeMachine(digger, 16, 2, 1, 0);                 // pit floor between the pad and the east digging face
 const haulers = [makeMegaHauler('megaHauler1'), makeMegaHauler('megaHauler2')];
 placeMachine(haulers[0], 92, -20, -1, 0);          // parked on the rim between the pit and the waste branch, off every road
 placeMachine(haulers[1], 92, 2, -1, 0);
@@ -1117,7 +1118,7 @@ const onLoadingPad = (x, z) => Math.abs(x - LOADING_PAD.x) < LOADING_PAD.w / 2 &
 // One leg: smooth curve sampled every ~1 m with height, heading, tilt and a speed limit per sample.
 // `before` / `after` are the neighbouring points just outside the leg; they set its heading at each end
 // (by default the curve carries straight on), so the truck never snaps round at a stop.
-function makeLeg(name, ctrl, { reverse = false, pause = 0, before, after } = {}) {
+function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before, after } = {}) {
   const mirror = (p, q) => [2 * p[0] - q[0], 2 * p[1] - q[1]];
   const all = [before ?? mirror(ctrl[0], ctrl[1]), ...ctrl, after ?? mirror(ctrl.at(-1), ctrl.at(-2))];
   const full = new THREE.CatmullRomCurve3(all.map(([x, z]) => new THREE.Vector3(x, 0, z)), false, 'centripetal');
@@ -1149,7 +1150,7 @@ function makeLeg(name, ctrl, { reverse = false, pause = 0, before, after } = {})
   // brake smoothly to a stop at the end of the leg
   vmax[n] = 0.4;
   for (let i = n - 1; i >= 0; i--) vmax[i] = Math.min(vmax[i], Math.sqrt(vmax[i + 1] ** 2 + 2 * DEC * step));
-  return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause };
+  return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause, action };
 }
 
 // Points along a circle round (cx, cz), from angle a0 to a1 (x = cx + R cos a, z = cz + R sin a)
@@ -1169,37 +1170,270 @@ const DUMP_RAMP_TOP = nearestSample(wasteRoadPts, WASTE_DUMP.rampX, DUMP_CREST.z
 const DUMP_TURN = { cx: WASTE_DUMP.rampX - 7.5, cz: DUMP_CREST.z0 + 10, R: 14 };
 const DUMP_TIP = { x: DUMP_TURN.cx - DUMP_TURN.R, z: DUMP_CREST.z1 - 11.5 };
 
-const haulRoute = [
-  // 1. off the pad, up the pit ramp, along the waste branch and up the dump ramp, round the half circle on top
-  makeLeg('toDumpTop', [
-    [4, 14], [-0.1, 14.3], [-4.3, 15.3], [-12.4, 18.7], [-20.4, 23.3], [-28.4, 28.2], [-36.4, 32.6],   // ~14 m-radius S onto the lane
-    ...lanePoints(roadPts, 16, HAUL_JUNCTION),
-    ...lanePoints(wasteRoadPts, 4, DUMP_RAMP_TOP),
-    [DUMP_TURN.cx + DUMP_TURN.R, DUMP_TURN.cz - 5],
-    ...arcPoints(DUMP_TURN.cx, DUMP_TURN.cz, DUMP_TURN.R, 0, Math.PI),
-  ], { pause: 1, before: [12, 14], after: [DUMP_TIP.x, DUMP_TURN.cz - 6] }),
-  // 2. reverse straight south to the crest berm (the body tips over the edge here from Stage 5)
-  makeLeg('toCrest', [
-    [DUMP_TIP.x, DUMP_TURN.cz], [DUMP_TIP.x, DUMP_TIP.z],
-  ], { reverse: true, pause: 3 }),
-  // 3. forward off the dump, down both ramps, then a 16 m-radius left turn on the pit floor
-  makeLeg('toPit', [
-    ...sBendNorth(DUMP_TIP.x, DUMP_TIP.z, WASTE_DUMP.rampX - LANE_OFF, wasteRoadPts[DUMP_RAMP_TOP].z),   // ~25 m-radius S
-    ...lanePoints(wasteRoadPts, DUMP_RAMP_TOP - 2, 4),
-    ...lanePoints(roadPts, HAUL_JUNCTION, 8),
-    ...arcPoints(-39, 3, 16, 1.05, 0, 8),
-    [-23, -16],
-  ], { pause: 1.5 }),
-  // 4. back in a 27 m-radius curve onto the loading pad, stopping facing the road (body toward the digger)
-  makeLeg('ontoPad', [
-    [-23, -16], ...arcPoints(4, -13, 27, Math.PI, Math.PI / 2),
-  ], { reverse: true, pause: 4, after: [10, 14] }),   // (loading happens here from Stage 5)
-];
+// Coal yard: a right-hand half circle (11 m) round the turning pad ends heading west; then the truck
+// reverses straight east until its rear is 0.5 m from the hopper's stop wall.
+const COAL_TURN = { cx: COAL_YARD.pad.x, cz: COAL_YARD.pad.z, R: 11 };
+const COAL_TIP = { x: COAL_YARD.crusher.x - 12.5 - 0.5 - 7.25, z: COAL_YARD.crusher.z };
+let COAL_END = coalRoadPts.length - 1;                     // last coal-road sample before the pad
+while (Math.hypot(coalRoadPts[COAL_END].x - COAL_TURN.cx, coalRoadPts[COAL_END].z - COAL_TURN.cz) < 22) COAL_END--;
 
-// Drive state: where the truck is on its route
-const truck1 = haulers[0];
-truck1.rotation.order = 'YZX';     // turn (y) after tilting along its length (z)
-const drive = { leg: haulRoute.length - 1, s: haulRoute.at(-1).len, v: 0, wait: 2, blend: 0, from: null };
+const dirOf = (a, b) => { const l = Math.hypot(b[0] - a[0], b[1] - a[1]); return [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; };
+// Smooth curve from p0 (heading d0) to p1 (heading d1); returns the points strictly between them
+function easeJoin(p0, d0, p1, d1, n = 8) {
+  const k = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  return Array.from({ length: n - 1 }, (_, i) => {
+    const s = (i + 1) / n, h00 = 2 * s ** 3 - 3 * s ** 2 + 1, h10 = s ** 3 - 2 * s ** 2 + s, h01 = -2 * s ** 3 + 3 * s ** 2, h11 = s ** 3 - s ** 2;
+    return [0, 1].map((j) => h00 * p0[j] + h10 * k * d0[j] + h01 * p1[j] + h11 * k * d1[j]);
+  });
+}
+
+// Shared pieces: off the loading pad up to the junction, and from the junction down to the floor turn
+const PAD_EXIT = [[4, 14], [-0.1, 14.3], [-4.3, 15.3], [-12.4, 18.7], [-20.4, 23.3], [-28.4, 28.2], [-36.4, 32.6],
+  ...lanePoints(roadPts, 16, HAUL_JUNCTION)];
+const PIT_RETURN = [...lanePoints(roadPts, HAUL_JUNCTION, 8), ...arcPoints(-39, 3, 16, 1.05, 0, 8), [-23, -16]];
+const coalIn = lanePoints(coalRoadPts, 4, COAL_END), coalOut = lanePoints(coalRoadPts, COAL_END, 4);
+const coalInDir = dirOf(coalIn.at(-2), coalIn.at(-1));
+const coalArcStart = Math.atan2(-coalInDir[0], coalInDir[1]) + 0.35;    // where the circle's heading matches the lane
+
+// Back in a 27 m-radius curve onto the loading pad, stopping facing the road (body toward the digger)
+const ontoPad = makeLeg('ontoPad', [[-23, -16], ...arcPoints(4, -13, 27, Math.PI, Math.PI / 2)],
+  { reverse: true, action: 'load', after: [10, 14] });
+
+const ROUTES = {
+  rock: [
+    makeLeg('toDumpTop', [...PAD_EXIT, ...lanePoints(wasteRoadPts, 4, DUMP_RAMP_TOP),
+      [DUMP_TURN.cx + DUMP_TURN.R, DUMP_TURN.cz - 5], ...arcPoints(DUMP_TURN.cx, DUMP_TURN.cz, DUMP_TURN.R, 0, Math.PI)],
+      { pause: 1, before: [12, 14], after: [DUMP_TIP.x, DUMP_TURN.cz - 6] }),
+    makeLeg('toCrest', [[DUMP_TIP.x, DUMP_TURN.cz], [DUMP_TIP.x, DUMP_TIP.z]], { reverse: true, action: 'tip' }),
+    makeLeg('rockToPit', [...sBendNorth(DUMP_TIP.x, DUMP_TIP.z, WASTE_DUMP.rampX - LANE_OFF, wasteRoadPts[DUMP_RAMP_TOP].z),
+      ...lanePoints(wasteRoadPts, DUMP_RAMP_TOP - 2, 4), ...PIT_RETURN], { pause: 1.5 }),
+    ontoPad,
+  ],
+  coal: [
+    makeLeg('toCoalPad', [...PAD_EXIT, ...coalIn, ...arcPoints(COAL_TURN.cx, COAL_TURN.cz, COAL_TURN.R, coalArcStart, Math.PI / 2)],
+      { pause: 1, before: [12, 14], after: [COAL_TURN.cx - 6, COAL_TIP.z] }),
+    makeLeg('toHopper', [[COAL_TURN.cx, COAL_TIP.z], [COAL_TIP.x, COAL_TIP.z]], { reverse: true, action: 'tip' }),
+    makeLeg('coalToPit', [[COAL_TIP.x, COAL_TIP.z],
+      ...easeJoin([COAL_TIP.x, COAL_TIP.z], [-1, 0], coalOut[0], dirOf(coalOut[0], coalOut[1])), ...coalOut, ...PIT_RETURN],
+      { pause: 1.5 }),
+    ontoPad,
+  ],
+};
+
+// ───────────────────────── Loads: lumpy rock / coal chunks ─────────────────────────
+// Pattern: rock, rock, coal, repeat. Chunks are low-poly lumps; the colour says what they are.
+const LOAD_PATTERN = ['rock', 'rock', 'coal'];
+const LOAD_COLORS = { rock: new THREE.Color(COLORS.wasteRock), coal: new THREE.Color(COLORS.coal) };
+const LAYERS_PER_LOAD = 4, CHUNKS_PER_LAYER = 7, GRAVITY = 9.8;
+const chunkGeo = new THREE.IcosahedronGeometry(1, 0);
+const chunkMat = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 0.7, metalness: 0 });
+const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
+
+// The heap in a truck body: 4 layers of 7 chunks, each layer a little narrower so it piles up in the middle
+function addLoadHeap(truck, seed) {
+  const r = makeRandom(seed), n = LAYERS_PER_LOAD * CHUNKS_PER_LAYER;
+  const mesh = new THREE.InstancedMesh(chunkGeo, chunkMat, n);
+  mesh.name = 'load';
+  mesh.castShadow = mesh.receiveShadow = true;
+  mesh.frustumCulled = false;
+  const base = [], xs = [];
+  for (let k = 0; k < LAYERS_PER_LOAD; k++) {
+    for (let j = 0; j < CHUNKS_PER_LAYER; j++) {
+      const spread = 1 - k * 0.2, size = 0.9 + r() * 0.5;
+      const x = -1.5 + (r() - 0.5) * 8.6 * spread, z = (r() - 0.5) * 5.6 * spread, y = 5.1 + k * 0.6 + r() * 0.3;
+      _q.setFromEuler(_e.set(r() * 3, r() * 3, r() * 3));
+      // body-local position (the body pivots at the rear hinge, -6.4 / 3.9)
+      base.push(new THREE.Matrix4().compose(new THREE.Vector3(x + 6.4, y - 3.9, z), _q.clone(), new THREE.Vector3(size * 1.25, size * 0.8, size)));
+      xs.push(x);
+    }
+  }
+  const lo = Math.min(...xs), hi = Math.max(...xs);
+  // while tipping, the chunks nearest the tail slide out first
+  const release = xs.map((x) => 0.3 + 0.3 * (x - lo) / (hi - lo));
+  truck.userData.body.add(mesh);
+  truck.userData.heap = { mesh, base, release, layers: 0, gone: new Array(n).fill(false), slide: new Float32Array(n), speed: new Float32Array(n) };
+  colourHeap(truck, 'rock');
+  showHeap(truck, 0);
+}
+function showHeap(truck, layers) {
+  const h = truck.userData.heap;
+  h.layers = layers;
+  h.base.forEach((m, i) => {
+    if (i >= layers * CHUNKS_PER_LAYER || h.gone[i]) return h.mesh.setMatrixAt(i, HIDDEN);
+    _m.copy(m).elements[12] -= h.slide[i];                  // sliding back along the body floor
+    h.mesh.setMatrixAt(i, _m);
+  });
+  h.mesh.instanceMatrix.needsUpdate = true;
+}
+function colourHeap(truck, type) {
+  const h = truck.userData.heap;
+  h.gone.fill(false); h.slide.fill(0); h.speed.fill(0);
+  for (let i = 0; i < h.base.length; i++) h.mesh.setColorAt(i, LOAD_COLORS[type]);
+  h.mesh.instanceColor.needsUpdate = true;
+}
+
+// Falling chunks (from the bucket into a truck, and out of a tipping truck): one pool, simple gravity
+const FALL_MAX = 80;
+const falling = new THREE.InstancedMesh(chunkGeo, chunkMat, FALL_MAX);
+falling.name = 'fallingChunks';
+falling.castShadow = true;
+falling.frustumCulled = false;
+const fallers = Array.from({ length: FALL_MAX }, (_, i) => {
+  falling.setMatrixAt(i, HIDDEN);
+  falling.setColorAt(i, LOAD_COLORS.rock);
+  return { on: false, p: new THREE.Vector3(), v: new THREE.Vector3(), q: new THREE.Quaternion(), spin: new THREE.Quaternion(), s: new THREE.Vector3(), floor: null };
+});
+scene.add(falling);
+// floor: the height where the chunk vanishes, or null to fall until it reaches the ground (dump slope, hopper pocket)
+function dropChunk(pos, vel, size, type, floor = null) {
+  const i = fallers.findIndex((f) => !f.on);
+  if (i < 0) return;
+  const f = fallers[i], r = Math.random;
+  f.on = true;
+  f.floor = floor;
+  f.p.copy(pos); f.v.copy(vel); f.s.set(size * 1.25, size * 0.8, size);
+  f.q.setFromEuler(_e.set(r() * 3, r() * 3, r() * 3));
+  f.spin.setFromEuler(_e.set((r() - 0.5) * 0.2, (r() - 0.5) * 0.2, (r() - 0.5) * 0.2));
+  falling.setColorAt(i, LOAD_COLORS[type]);
+  falling.instanceColor.needsUpdate = true;
+}
+function updateFalling(dt) {
+  fallers.forEach((f, i) => {
+    if (!f.on) return;
+    f.v.y -= GRAVITY * dt;
+    f.p.addScaledVector(f.v, dt);
+    f.q.multiply(f.spin);
+    const floor = f.floor ?? groundAt(f.p.x, f.p.z) + 0.3;
+    if (f.p.y < floor) { f.on = false; falling.setMatrixAt(i, HIDDEN); }
+    else falling.setMatrixAt(i, _m.compose(f.p, f.q, f.s));
+  });
+  falling.instanceMatrix.needsUpdate = true;
+}
+
+// ───────────────────────── Big Digger: 4 scoops per load ─────────────────────────
+// A pose gives where the bucket pin is (reach r from the swing centre, height y above the tracks), the
+// upper-body swing and the bucket's angle; the boom and stick angles are solved to reach that point.
+const DIG = { L1: 9.4, L2: 5.4, pinR: 2.2, pinY: 2.7 + 1.6 };
+const diggerParts = Object.fromEntries(['upperBody', 'boom', 'stick', 'bucket'].map((n) => [n, digger.getObjectByName(n)]));
+function poseDigger({ swing, r, y, b }) {
+  const dx = r - DIG.pinR, dy = y - DIG.pinY, d = clamp(Math.hypot(dx, dy), 4.2, DIG.L1 + DIG.L2 - 0.1);
+  const a1 = Math.atan2(dy, dx) + Math.acos(clamp((DIG.L1 ** 2 + d * d - DIG.L2 ** 2) / (2 * DIG.L1 * d), -1, 1));   // elbow up
+  const a2 = Math.atan2(dy - DIG.L1 * Math.sin(a1), dx - DIG.L1 * Math.cos(a1));
+  diggerParts.upperBody.rotation.y = swing;
+  diggerParts.boom.rotation.z = a1;
+  diggerParts.stick.rotation.z = a2 - a1;
+  diggerParts.bucket.rotation.z = b - a2;          // b = bucket angle to the ground: -1.4 teeth down, -2.9 curled full, -0.7 tipped
+}
+const lerpPose = (a, b, t) => ({ swing: lerp(a.swing, b.swing, t), r: lerp(a.r, b.r, t), y: lerp(a.y, b.y, t), b: lerp(a.b, b.b, t) });
+const ease = (t) => t * t * (3 - 2 * t);
+const REST_POSE = { swing: 0, r: 10, y: 3, b: -1.9 };
+const FACE = {   // the east wall: beige overburden along its top edge, the black seam lower down
+  rock: { start: { r: 13.4, y: 10, b: -1.4 }, end: { r: 11.5, y: 10.6, b: -2.9 } },
+  coal: { start: { r: 11.4, y: 4.4, b: -1.4 }, end: { r: 9.5, y: 5, b: -2.9 } },
+};
+const SCOOP_PHASES = [['toFace', 3], ['dig', 2], ['lift', 1.5], ['toTruck', 3], ['dump', 1.2], ['hold', 0.4]];
+
+// Bucket contents: a few lumps that show while the bucket is full
+const bucketLoadMat = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 0.7, vertexColors: true });
+const bucketLoad = partsMesh('bucketLoad', [[0.8, -0.9], [2.0, 0.2], [1.2, 1.1], [1.8, -1.3]].map(([x, z], k) =>
+  part(new THREE.IcosahedronGeometry(0.75 + k * 0.08, 0), 0xffffff, { at: [x, -2.45, z], rot: [k, k * 2, 0] })), bucketLoadMat);
+bucketLoad.visible = false;
+diggerParts.bucket.add(bucketLoad);
+
+const dig = { driver: null, k: 0, phase: 0, t: 0, from: { ...REST_POSE }, to: { ...REST_POSE }, pose: { ...REST_POSE }, type: 'rock', loads: 0, dropped: false };
+poseDigger(REST_POSE);
+
+function startLoading(driver) {
+  dig.driver = driver;
+  dig.type = LOAD_PATTERN[dig.loads % LOAD_PATTERN.length];
+  dig.loads++;
+  dig.k = 0;
+  driver.load = dig.type;
+  colourHeap(driver.truck, dig.type);
+  showHeap(driver.truck, 0);
+  bucketLoadMat.color.copy(LOAD_COLORS[dig.type]);
+  nextScoopPhase(0);
+}
+// Where the bucket goes over the truck: above the rear half of the body, on the side nearer the digger
+function truckTarget(truck, k) {
+  _v.set(-4 + k * 1.2, 5, k % 2 ? 1.8 : 0.7).applyMatrix4(truck.matrixWorld);
+  const dx = _v.x - digger.position.x, dz = _v.z - digger.position.z;
+  return { swing: Math.atan2(-dz, dx), r: Math.hypot(dx, dz) - 1.2, y: _v.y - digger.position.y + 6.5 };
+}
+function nextScoopPhase(phase) {
+  dig.phase = phase; dig.t = 0; dig.dropped = false;
+  dig.from = { ...dig.pose };
+  const face = FACE[dig.type], swingAtFace = dig.k % 2 ? 0.08 : -0.06;
+  const name = SCOOP_PHASES[phase][0];
+  if (name === 'toFace') dig.to = { swing: swingAtFace, ...face.start };
+  if (name === 'dig') dig.to = { swing: swingAtFace, ...face.end };
+  if (name === 'lift') dig.to = { swing: swingAtFace - 0.35, r: 10, y: 12, b: -3.0 };
+  if (name === 'toTruck') dig.to = { ...truckTarget(dig.driver.truck, dig.k), b: -3.0 };
+  if (name === 'dump') dig.to = { ...dig.pose, b: -0.7 };
+  if (name === 'hold') dig.to = { ...dig.pose };
+}
+function updateDigger(dt) {
+  dig.t += dt;
+  if (!dig.driver) {                                       // ease back to rest between trucks
+    dig.pose = lerpPose(dig.pose, REST_POSE, Math.min(dt * 0.8, 1));
+    poseDigger(dig.pose);
+    return;
+  }
+  const [name, dur] = SCOOP_PHASES[dig.phase];
+  dig.pose = lerpPose(dig.from, dig.to, ease(Math.min(dig.t / dur, 1)));
+  poseDigger(dig.pose);
+  if (name === 'dig' && dig.t >= dur * 0.5) bucketLoad.visible = true;      // the bucket fills as it curls
+  if (name === 'dump' && !dig.dropped && dig.t >= dur * 0.35) {            // lumps fall into the body
+    dig.dropped = true;
+    bucketLoad.visible = false;
+    digger.updateMatrixWorld(true);
+    const floorY = dig.driver.truck.position.y + 5 + dig.k * 0.6;
+    for (let j = 0; j < 6; j++) {
+      _v.set(0.6 + Math.random() * 1.8, -2.4, (Math.random() - 0.5) * 2.6).applyMatrix4(diggerParts.bucket.matrixWorld);
+      dropChunk(_v, _s.set(Math.random() - 0.5, -1, Math.random() - 0.5), 0.7 + Math.random() * 0.4, dig.type, floorY);
+    }
+  }
+  if (dig.t < dur) return;
+  if (name === 'hold') {
+    showHeap(dig.driver.truck, ++dig.k);                   // the next layer of the heap appears
+    if (dig.k === LAYERS_PER_LOAD) { dig.driver.loaded = true; dig.driver = null; return; }
+  }
+  nextScoopPhase((dig.phase + 1) % SCOOP_PHASES.length);
+}
+
+// ───────────────────────── Beep icon (shown while a truck reverses) ─────────────────────────
+const beepTexture = canvasTexture(128, 128, (ctx, w, h) => {
+  ctx.fillStyle = '#F5B400';
+  ctx.beginPath(); ctx.arc(w / 2, h / 2, 58, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 6; ctx.strokeStyle = '#2B2B2B'; ctx.stroke();
+  ctx.fillStyle = '#2B2B2B';                                 // a little speaker with two sound waves
+  ctx.beginPath(); ctx.moveTo(30, 52); ctx.lineTo(46, 52); ctx.lineTo(66, 34); ctx.lineTo(66, 94); ctx.lineTo(46, 76); ctx.lineTo(30, 76); ctx.closePath(); ctx.fill();
+  ctx.lineWidth = 7; ctx.lineCap = 'round';
+  for (const rr of [14, 28]) { ctx.beginPath(); ctx.arc(66, 64, rr, -0.7, 0.7); ctx.stroke(); }
+});
+function addBeep(truck) {
+  const beep = new THREE.Sprite(new THREE.SpriteMaterial({ map: beepTexture, depthTest: false }));
+  beep.position.set(-2, 11, 0);
+  beep.scale.set(3, 3, 1);
+  beep.visible = false;
+  beep.renderOrder = 10;
+  truck.add(beep);
+  truck.userData.beep = beep;
+}
+
+// ───────────────────────── Mega Hauler: drive, load, tip ─────────────────────────
+const TIP_MAX = 0.68;                     // body angle at full tip: the front of the body is ~15.3 m up
+const TIP_TIMES = { raise: 3, hold: 2.5, lower: 3 };
+const TAIL_X = -7.2 + 6.4 + 0.6;          // body-local x where a chunk tips over the tail lip
+function makeDriver(truck, seed) {
+  truck.rotation.order = 'YZX';           // turn (y) after tilting along its length (z)
+  addLoadHeap(truck, seed);
+  addBeep(truck);
+  return { truck, route: ROUTES.rock, leg: ROUTES.rock.length - 1, s: ontoPad.len, v: 0, wait: 0, task: null,
+    load: 'rock', loaded: false, tipT: 0, blend: 0, from: null, beepT: 0 };
+}
+const truck1 = makeDriver(haulers[0], 61);
 
 function poseOnLeg(obj, leg, s) {
   const f = clamp(s / leg.step, 0, leg.n), i = Math.min(Math.floor(f), leg.n - 1), t = f - i;
@@ -1208,34 +1442,99 @@ function poseOnLeg(obj, leg, s) {
   obj.rotation.y = lerpAngle(leg.yaw[i], leg.yaw[i + 1], t);
   obj.rotation.z = lerp(leg.pitch[i], leg.pitch[i + 1], t);
 }
-
-function updateHauler(dt) {
-  const d = drive;
-  if (d.wait > 0) {
+function startNextLeg(d) {
+  if (d.leg === d.route.length - 1) d.route = ROUTES[d.load];      // loaded on the pad: pick the destination
+  d.leg = (d.leg + 1) % d.route.length; d.s = 0; d.v = 0;
+  // ease out of any small mismatch between where one leg ends and the next begins
+  d.from = { x: d.truck.position.x, z: d.truck.position.z, yaw: d.truck.rotation.y }; d.blend = 1;
+}
+function startTask(d, task) {
+  d.task = task;
+  if (task === 'load') { d.loaded = false; startLoading(d); }
+  if (task === 'tip') d.tipT = 0;
+}
+// Raise the body, let the chunks slide out over the berm / into the hopper, lower it again
+function updateTip(d, dt) {
+  const { body, heap } = d.truck.userData, T = TIP_TIMES;
+  d.tipT += dt;
+  const t = d.tipT;
+  body.rotation.z = TIP_MAX * (t < T.raise ? ease(t / T.raise) : t < T.raise + T.hold ? 1 : 1 - ease(Math.min((t - T.raise - T.hold) / T.lower, 1)));
+  d.truck.updateMatrixWorld(true);
+  // once the body is steep enough, each chunk slides back along the floor (tail end first), then
+  // leaves over the tail lip and falls: over the berm on the dump, into the pocket at the hopper
+  const back = _s.set(-1, 0, 0).transformDirection(body.matrixWorld);       // down the tilted floor
+  const lowering = t > T.raise + T.hold;
+  let changed = false;
+  heap.base.forEach((m, i) => {
+    if (heap.gone[i] || i >= heap.layers * CHUNKS_PER_LAYER || body.rotation.z < heap.release[i]) return;
+    changed = true;
+    heap.speed[i] = Math.min(heap.speed[i] + 5 * dt, 7);
+    heap.slide[i] += heap.speed[i] * dt;
+    if (m.elements[12] - heap.slide[i] > TAIL_X && !lowering) return;
+    heap.gone[i] = true;
+    _m.copy(m).elements[12] -= heap.slide[i];
+    _v.setFromMatrixPosition(_m.premultiply(body.matrixWorld));
+    // tumbles off the lip moving mostly backward, so it clears the berm / the stop wall
+    const speed = (d.load === 'coal' ? 3.2 : 5) + Math.random() * 1.2, flat = Math.hypot(back.x, back.z);
+    dropChunk(_v, new THREE.Vector3(back.x / flat * speed + Math.random() - 0.5, -0.5, back.z / flat * speed + Math.random() - 0.5), 1.0, d.load);
+  });
+  if (changed) showHeap(d.truck, heap.layers);
+  if (t < T.raise + T.hold + T.lower) return false;
+  body.rotation.z = 0;
+  showHeap(d.truck, 0);
+  return true;
+}
+function updateTruck(d, dt) {
+  const leg = d.route[d.leg];
+  if (d.task === 'load') {
+    if (d.loaded) { d.task = null; startNextLeg(d); }
+  } else if (d.task === 'tip') {
+    if (updateTip(d, dt)) { d.task = null; startNextLeg(d); }
+  } else if (d.wait > 0) {
     d.wait -= dt;
-    if (d.wait <= 0) {
-      d.leg = (d.leg + 1) % haulRoute.length; d.s = 0; d.v = 0;
-      // ease out of any small mismatch between where one leg ends and the next begins
-      d.from = { x: truck1.position.x, z: truck1.position.z, yaw: truck1.rotation.y }; d.blend = 1;
-    }
+    if (d.wait <= 0) startNextLeg(d);
   } else {
-    const leg = haulRoute[d.leg], i = Math.min(Math.round(d.s / leg.step), leg.n);
+    const i = Math.min(Math.round(d.s / leg.step), leg.n);
     d.v = Math.max(Math.min(d.v + ACC * dt, leg.vmax[i]), 0.3);
     const ds = Math.min(d.v * dt, leg.len - d.s);
     d.s += ds;
-    truck1.userData.wheels.forEach((w) => { w.rotation.z -= (leg.reverse ? -ds : ds) / 2.0; });
-    if (d.s >= leg.len) d.wait = leg.pause;
+    d.truck.userData.wheels.forEach((w) => { w.rotation.z -= (leg.reverse ? -ds : ds) / 2.0; });
+    if (d.s >= leg.len) { if (leg.action) startTask(d, leg.action); else d.wait = leg.pause; }
   }
-  poseOnLeg(truck1, haulRoute[d.leg], d.s);
+  const now = d.route[d.leg];
+  poseOnLeg(d.truck, now, d.s);
   if (d.blend > 0) {
     d.blend = Math.max(d.blend - dt, 0);
     const t = d.blend * d.blend;
-    truck1.position.x = lerp(truck1.position.x, d.from.x, t);
-    truck1.position.z = lerp(truck1.position.z, d.from.z, t);
-    truck1.rotation.y = lerpAngle(truck1.rotation.y, d.from.yaw, t);
+    d.truck.position.x = lerp(d.truck.position.x, d.from.x, t);
+    d.truck.position.z = lerp(d.truck.position.z, d.from.z, t);
+    d.truck.rotation.y = lerpAngle(d.truck.rotation.y, d.from.yaw, t);
   }
+  // the beep icon pulses while the truck reverses
+  const reversing = now.reverse && !d.task && d.wait <= 0 && d.s < now.len;
+  const beep = d.truck.userData.beep;
+  beep.visible = reversing;
+  if (reversing) { d.beepT += dt; beep.scale.setScalar(3 + 0.5 * Math.abs(Math.sin(d.beepT * 4))); }
 }
-updateHauler(0);
+
+// The spotter raises the flag while a truck backs onto the loading pad
+function updateSpotter(dt, drivers) {
+  const backingIn = drivers.some((d) => d.route[d.leg] === ontoPad && !d.task && d.s < ontoPad.len);
+  const arm = spotter.userData.flagArm;
+  arm.rotation.z = lerp(arm.rotation.z, backingIn ? 2.4 : 0, Math.min(dt * 2, 1));
+}
+
+const drivers = [truck1];
+poseOnLeg(truck1.truck, ontoPad, ontoPad.len);
+truck1.truck.updateMatrixWorld(true);
+startTask(truck1, 'load');                // the first truck starts on the pad, ready to be loaded
+
+function updateMine(dt) {
+  drivers.forEach((d) => updateTruck(d, dt));
+  updateDigger(dt);
+  updateSpotter(dt, drivers);
+  updateFalling(dt);
+}
 
 // ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
 const puffs = [];
@@ -1319,7 +1618,7 @@ window.addEventListener('resize', () => {
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1) * TIME_SCALE;     // no big jumps after a hidden tab
-  updateHauler(dt);
+  updateMine(dt);
   controls.update();
   limitCamera();
   renderer.render(scene, camera);
