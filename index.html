@@ -79,7 +79,7 @@ const PIT_CELL = 2;
 
 // Layers seen in the walls: the height where each band ENDS (going down from the surface).
 // The coal seam fills the whole bottom step and continues under the floor.
-const LAYERS = { topsoil: -1.5, clay: -5, sandstone: -16.3, coal: -26 };
+const LAYERS = { topsoil: -1.5, clay: -5, sandstone: -20, coal: -26 };
 
 // Haul road centre line, from the loading area on the pit floor up the ramp to the junction on the rim.
 // The bend at the foot of the ramp is a 32 m-radius arc round (-64, -2), as wide as the pit allows.
@@ -1074,8 +1074,7 @@ const SERVICE_LANE_START = (LANE_CROSS + lanePts.length / 2) % lanePts.length;  
 const digger = makeDigger();
 placeMachine(digger, 16, 2, 1, 0);                 // pit floor between the pad and the east digging face
 const haulers = [makeMegaHauler('megaHauler1'), makeMegaHauler('megaHauler2')];
-placeMachine(haulers[0], 92, -20, -1, 0);          // parked on the rim between the pit and the waste branch, off every road
-placeMachine(haulers[1], 92, 2, -1, 0);
+haulers.forEach((h) => scene.add(h));             // both drive the loop; their poses are set by the route code
 const waterTruck = makeWaterTruck();
 placeMachine(waterTruck, 30, -85, 1, 0);           // under the water tower spout, off the road
 const flagPickup = makeFlagPickup();
@@ -1119,6 +1118,7 @@ const onLoadingPad = (x, z) => Math.abs(x - LOADING_PAD.x) < LOADING_PAD.w / 2 &
 // `before` / `after` are the neighbouring points just outside the leg; they set its heading at each end
 // (by default the curve carries straight on), so the truck never snaps round at a stop.
 function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before, after } = {}) {
+  // holds / releases are added after the leg is built (see ZONES)
   const mirror = (p, q) => [2 * p[0] - q[0], 2 * p[1] - q[1]];
   const all = [before ?? mirror(ctrl[0], ctrl[1]), ...ctrl, after ?? mirror(ctrl.at(-1), ctrl.at(-2))];
   const full = new THREE.CatmullRomCurve3(all.map(([x, z]) => new THREE.Vector3(x, 0, z)), false, 'centripetal');
@@ -1150,7 +1150,7 @@ function makeLeg(name, ctrl, { reverse = false, pause = 0, action = null, before
   // brake smoothly to a stop at the end of the leg
   vmax[n] = 0.4;
   for (let i = n - 1; i >= 0; i--) vmax[i] = Math.min(vmax[i], Math.sqrt(vmax[i + 1] ** 2 + 2 * DEC * step));
-  return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause, action };
+  return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause, action, holds: [], releases: [] };
 }
 
 // Points along a circle round (cx, cz), from angle a0 to a1 (x = cx + R cos a, z = cz + R sin a)
@@ -1328,8 +1328,8 @@ function poseDigger({ swing, r, y, b }) {
 const lerpPose = (a, b, t) => ({ swing: lerp(a.swing, b.swing, t), r: lerp(a.r, b.r, t), y: lerp(a.y, b.y, t), b: lerp(a.b, b.b, t) });
 const ease = (t) => t * t * (3 - 2 * t);
 const REST_POSE = { swing: 0, r: 10, y: 3, b: -1.9 };
-const FACE = {   // the east wall: beige overburden along its top edge, the black seam lower down
-  rock: { start: { r: 13.4, y: 10, b: -1.4 }, end: { r: 11.5, y: 10.6, b: -2.9 } },
+const FACE = {   // the east wall: a beige overburden band (4-8 m up) above the black coal seam (0-4 m up)
+  rock: { start: { r: 12.6, y: 9.2, b: -1.4 }, end: { r: 10.8, y: 9.6, b: -2.9 } },
   coal: { start: { r: 11.4, y: 4.4, b: -1.4 }, end: { r: 9.5, y: 5, b: -2.9 } },
 };
 const SCOOP_PHASES = [['toFace', 3], ['dig', 2], ['lift', 1.5], ['toTruck', 3], ['dump', 1.2], ['hold', 0.4]];
@@ -1433,7 +1433,6 @@ function makeDriver(truck, seed) {
   return { truck, route: ROUTES.rock, leg: ROUTES.rock.length - 1, s: ontoPad.len, v: 0, wait: 0, task: null,
     load: 'rock', loaded: false, tipT: 0, blend: 0, from: null, beepT: 0 };
 }
-const truck1 = makeDriver(haulers[0], 61);
 
 function poseOnLeg(obj, leg, s) {
   const f = clamp(s / leg.step, 0, leg.n), i = Math.min(Math.floor(f), leg.n - 1), t = f - i;
@@ -1494,10 +1493,13 @@ function updateTruck(d, dt) {
     d.wait -= dt;
     if (d.wait <= 0) startNextLeg(d);
   } else {
-    const i = Math.min(Math.round(d.s / leg.step), leg.n);
-    d.v = Math.max(Math.min(d.v + ACC * dt, leg.vmax[i]), 0.3);
-    const ds = Math.min(d.v * dt, leg.len - d.s);
+    const i = Math.min(Math.round(d.s / leg.step), leg.n), limit = Math.min(leg.vmax[i], trafficLimit(d, leg));
+    d.v = Math.min(d.v + ACC * dt, limit);
+    if (limit >= 0.3) d.v = Math.max(d.v, 0.3);     // creep to the exact stopping point at a leg's end
+    const ds = Math.max(Math.min(d.v * dt, leg.len - d.s, d.stopAt - d.s), 0);
+    if (ds < d.v * dt) d.v = ds / dt;
     d.s += ds;
+    for (const r of leg.releases) if (zones[r.zone] === d && d.s >= r.s) zones[r.zone] = null;
     d.truck.userData.wheels.forEach((w) => { w.rotation.z -= (leg.reverse ? -ds : ds) / 2.0; });
     if (d.s >= leg.len) { if (leg.action) startTask(d, leg.action); else d.wait = leg.pause; }
   }
@@ -1511,7 +1513,7 @@ function updateTruck(d, dt) {
     d.truck.rotation.y = lerpAngle(d.truck.rotation.y, d.from.yaw, t);
   }
   // the beep icon pulses while the truck reverses
-  const reversing = now.reverse && !d.task && d.wait <= 0 && d.s < now.len;
+  const reversing = now.reverse && !d.task && d.wait <= 0 && d.s < now.len && d.v > 0.05;
   const beep = d.truck.userData.beep;
   beep.visible = reversing;
   if (reversing) { d.beepT += dt; beep.scale.setScalar(3 + 0.5 * Math.abs(Math.sin(d.beepT * 4))); }
@@ -1524,10 +1526,62 @@ function updateSpotter(dt, drivers) {
   arm.rotation.z = lerp(arm.rotation.z, backingIn ? 2.4 : 0, Math.min(dt * 2, 1));
 }
 
-const drivers = [truck1];
-poseOnLeg(truck1.truck, ontoPad, ontoPad.len);
-truck1.truck.updateMatrixWorld(true);
-startTask(truck1, 'load');                // the first truck starts on the pad, ready to be loaded
+// ───────────────────────── Sharing the road: zones and the following gap ─────────────────────────
+// Only one truck at a time on the loading pad, on the dump top and on the coal pad. A truck that finds
+// a zone taken stops at that zone's hold point and waits: at the "WAIT HERE" sign for the pad, at the
+// foot of the dump ramp, and before the service-lane crossing for the coal pad (never on the crossing).
+const zones = { pad: null, dumpTop: null, coalPad: null };
+const sAt = (leg, x, z) => nearestSample(leg.pts, x, z) * leg.step;          // distance along a leg nearest a point
+const coalCross = lanePts[LANE_CROSS];
+{
+  const q = roadPts[QUEUE_INDEX], L = leftAt(roadPts, QUEUE_INDEX);
+  const queue = [q.x - L.x * LANE_OFF, q.z - L.z * LANE_OFF];               // the inbound lane beside the sign
+  const [toTop, , fromTop] = ROUTES.rock, [toCoal, , fromCoal] = ROUTES.coal;
+  for (const leg of [fromTop, fromCoal]) leg.holds.push({ zone: 'pad', s: sAt(leg, ...queue) });
+  for (const leg of [toTop, toCoal]) leg.releases.push({ zone: 'pad', s: 55 });        // well clear of the pad and the floor turn
+  toTop.holds.push({ zone: 'dumpTop', s: sAt(toTop, WASTE_DUMP.rampX + LANE_OFF, WASTE_DUMP.rampZ0 - 6) });
+  fromTop.releases.push({ zone: 'dumpTop', s: sAt(fromTop, WASTE_DUMP.rampX - LANE_OFF, DUMP_CREST.z0 - 6) });   // on its way down the ramp
+  toCoal.holds.push({ zone: 'coalPad', s: sAt(toCoal, coalCross.x, coalCross.z) - (7.25 + SERVICE_LANE.hw + 6) });
+  fromCoal.releases.push({ zone: 'coalPad', s: sAt(fromCoal, coalCross.x, coalCross.z) + 7.25 + SERVICE_LANE.hw + 3 });
+}
+const FOLLOW_GAP = 25;                    // metres kept clear in front of a truck, to the next truck in its lane
+const TRUCK_LEN = 14.5;
+
+// Speed limit from the zones ahead of this truck and from any truck in front of it in the same lane
+// (d.stopAt is a hard limit: a truck never rolls past a hold point while that zone is taken)
+function trafficLimit(d, leg) {
+  let limit = Infinity;
+  d.stopAt = Infinity;
+  for (const h of leg.holds) {
+    if (zones[h.zone] === d || d.s > h.s) continue;
+    if (!zones[h.zone] && h.s - d.s < 120) { zones[h.zone] = d; continue; }   // free: claim it and drive on
+    if (zones[h.zone]) { limit = Math.min(limit, Math.sqrt(2 * DEC * Math.max(h.s - d.s, 0))); d.stopAt = Math.min(d.stopAt, h.s); }
+  }
+  const dir = leg.reverse ? -1 : 1, yaw = d.truck.rotation.y;
+  const fx = Math.cos(yaw) * dir, fz = -Math.sin(yaw) * dir;                  // the way this truck is moving
+  for (const o of drivers) {
+    if (o === d || Math.abs(angleDiff(o.truck.rotation.y, yaw)) > 1) continue;   // only trucks facing our way (same lane)
+    const dx = o.truck.position.x - d.truck.position.x, dz = o.truck.position.z - d.truck.position.z;
+    const ahead = dx * fx + dz * fz, side = Math.abs(dx * fz - dz * fx);
+    if (ahead <= 0 || ahead > 80 || side > 5 || Math.abs(o.truck.position.y - d.truck.position.y) > 4) continue;
+    limit = Math.min(limit, Math.sqrt(2 * DEC * Math.max(ahead - TRUCK_LEN - FOLLOW_GAP, 0)));
+  }
+  return limit;
+}
+
+const drivers = [makeDriver(haulers[0], 61), makeDriver(haulers[1], 62)];
+// Truck 1 starts on the pad, ready to be loaded. Truck 2 starts on the dump top having just tipped,
+// about half a trip behind, so the two never bunch up.
+{
+  const [t1, t2] = drivers;
+  poseOnLeg(t1.truck, ontoPad, ontoPad.len);
+  t1.truck.updateMatrixWorld(true);
+  zones.pad = t1;
+  startTask(t1, 'load');
+  Object.assign(t2, { route: ROUTES.rock, leg: 1, s: ROUTES.rock[1].len, wait: 2 });   // at the crest berm, empty
+  zones.dumpTop = t2;
+  poseOnLeg(t2.truck, ROUTES.rock[1], t2.s);
+}
 
 function updateMine(dt) {
   drivers.forEach((d) => updateTruck(d, dt));
