@@ -82,29 +82,37 @@ const PIT_CELL = 2;
 const LAYERS = { topsoil: -1.5, clay: -5, sandstone: -16.3, coal: -26 };
 
 // Haul road centre line, from the loading area on the pit floor up the ramp to the junction on the rim.
+// The bend at the foot of the ramp is a 32 m-radius arc round (-64, -2), as wide as the pit allows.
 const HAUL_ROAD_POINTS = [
   [-16, 18],   // 0: road end on the pit floor, beside the loading pad
-  [-56, 22],   // 1: foot of the ramp
-  [-80, 30],
-  [-96, 10],
+  [-44, 29],   // 1: foot of the ramp (the climb starts here)
+  [-64, 30], [-80, 25.7], [-91.7, 14], [-96, -2],   // the wide bend
   [-96, -46],
   [-80, -64],
-  [60, -64],   // 6: top of the ramp, on the rim
-  [88, -64],   // 7: junction — the road splits to the coal yard and the waste dump
+  [60, -64],   // 8: top of the ramp, on the rim
+  [88, -64],   // 9: junction — the road splits to the coal yard and the waste dump
 ];
+const RAMP_FOOT_POINT = 1, RAMP_TOP_POINT = 8;
+
+// Simulation speed: machines move at real speeds, sped up by this factor so one Mega Hauler loop
+// takes about a minute. Every movement and timer uses it; the speed buttons will multiply it.
+const TIME_SCALE = 3.85;
 // The two branches start on the trunk just before the junction so the road surfaces join smoothly
 const COAL_ROAD_POINTS  = [[70, -64], [88, -64], [106, -72], [121, -88], [132, -104]];
-const WASTE_ROAD_POINTS = [[70, -64], [88, -64], [108, -54], [127, -34], [145, -8]];
-const ROAD_HW = 12;             // half width of the two-lane haul road (24 m: trucks are 9.2 m wide)
-const ROAD_FLAT_HW = 13;        // ground is levelled a little wider than the road surface
+// The waste branch swings south, then climbs a straight 60 m ramp onto the top of the waste dump.
+const WASTE_ROAD_POINTS = [[70, -64], [88, -64], [118, -62], [148, -52], [168, -34], [174, -14], [174, -8], [174, 52], [174, 55]];
+const ROAD_HW = 15;             // half width of the two-lane haul road (30 m: trucks are 9.2 m wide)
+const ROAD_FLAT_HW = 16;        // ground is levelled a little wider than the road surface
 const BERM_HEIGHT = 1.5;
 
 const LOADING_PAD = { x: 4, z: 14, w: 22, d: 16 };
 const QUEUE_BACK = 40;          // queue sign is ~40 m back along the road from the loading pad
-// Coal yard: trucks tip into the crusher hopper at the edge of the turning pad; a conveyor feeds the pile.
-const COAL_YARD = { pad: { x: 132, z: -104, r: 18 }, crusher: { x: 157, z: -112 }, pile: { x: 165, z: -138 } };
-// Waste dump: a stepped, flat-topped mesa beside its own turning pad, further from the pit.
-const WASTE_DUMP = { pad: { x: 145, z: -8, r: 18 }, pile: { x: 172, z: 36 } };
+// Coal yard: trucks circle the turning pad, then reverse straight east up to a concrete stop wall and tip
+// into a hopper pocket set in the ground. The crusher shed beside it feeds a conveyor to the pile.
+const COAL_YARD = { pad: { x: 132, z: -104, r: 18 }, crusher: { x: 162, z: -93 }, pile: { x: 165, z: -138 } };
+// Waste dump: a flat-topped dump (crest 48 × 48 m, 7 m high, 8 m wide side slopes) with a 60 m ramp up
+// its north side. Trucks turn on top and reverse to a safety berm on the south crest to tip over the edge.
+const WASTE_DUMP = { cx: 166, cz: 76, hw: 24, h: 7, slope: 8, rampX: 174, rampZ0: -8 };
 const SERVICE_LANE = { cx: 148, cz: -122, r: 46, hw: 3 };  // loop around the coal yard, crosses the coal branch once
 const OFFICE = { x: 140, z: 28 };
 const WATER_TOWER = { x: 30, z: -94 };
@@ -235,8 +243,8 @@ const nearestSample = (pts, x, z) => {
   pts.forEach((p, i) => { const d = (p.x - x) ** 2 + (p.z - z) ** 2; if (d < bd) { bd = d; best = i; } });
   return best;
 };
-const ROAD_FOOT = nearestSample(roadPts, ...HAUL_ROAD_POINTS[1]);
-const ROAD_TOP = nearestSample(roadPts, ...HAUL_ROAD_POINTS[6]);
+const ROAD_FOOT = nearestSample(roadPts, ...HAUL_ROAD_POINTS[RAMP_FOOT_POINT]);
+const ROAD_TOP = nearestSample(roadPts, ...HAUL_ROAD_POINTS[RAMP_TOP_POINT]);
 // Flat on the floor, an even slope up the ramp (~9%), flat on the rim
 roadPts.forEach((p, i) => {
   p.y = i <= ROAD_FOOT ? FLOOR_Y : i >= ROAD_TOP ? 0 : FLOOR_Y * (ROAD_TOP - i) / (ROAD_TOP - ROAD_FOOT);
@@ -249,6 +257,22 @@ function samplePath(points) {
 }
 const coalRoadPts = samplePath(COAL_ROAD_POINTS);
 const wasteRoadPts = samplePath(WASTE_ROAD_POINTS);
+
+// Waste dump height: a square flat top with sloping sides, plus the access ramp (road-wide, sloped sides)
+const DUMP_CREST = {
+  x0: WASTE_DUMP.cx - WASTE_DUMP.hw, x1: WASTE_DUMP.cx + WASTE_DUMP.hw,
+  z0: WASTE_DUMP.cz - WASTE_DUMP.hw, z1: WASTE_DUMP.cz + WASTE_DUMP.hw,
+};
+function dumpH(x, z) {
+  const { cx, cz, hw, h, slope, rampX, rampZ0 } = WASTE_DUMP;
+  const out = Math.max(Math.abs(x - cx), Math.abs(z - cz)) - hw;           // metres outside the crest
+  const mesa = h * clamp(1 - out / slope, 0, 1);
+  const rampY = h * clamp((z - rampZ0) / (DUMP_CREST.z0 - rampZ0), 0, 1);
+  const side = Math.abs(x - rampX) - ROAD_HW;
+  const ramp = z < rampZ0 ? 0 : Math.max(rampY - Math.max(side, 0) * h / slope, 0);
+  return Math.max(mesa, ramp);
+}
+wasteRoadPts.forEach((p) => { p.y = dumpH(p.x, p.z); });
 const ALL_ROADS = [roadPts, coalRoadPts, wasteRoadPts];
 const distToRoads = (x, z) => Math.min(...ALL_ROADS.map((pts) => nearestOnPath(pts, x, z).d));
 
@@ -287,7 +311,7 @@ function groundH(x, z) {
 // Ground height anywhere (used to keep the camera above ground)
 function groundAt(x, z) {
   if (x > PIT_BOX.x0 && x < PIT_BOX.x1 && z > PIT_BOX.z0 && z < PIT_BOX.z1) return groundH(x, z);
-  return heightAt(x, z);
+  return Math.max(heightAt(x, z), dumpH(x, z));
 }
 
 // ───────────────────────── Grid builder ─────────────────────────
@@ -497,8 +521,8 @@ for (const [name, pts] of [['haulRoad', roadPts], ['coalRoad', coalRoadPts], ['w
   scene.add(road);
 }
 
-// Turning pads at the end of each branch (flat, levelled road surface)
-for (const [name, pad] of [['coalPad', COAL_YARD.pad], ['wastePad', WASTE_DUMP.pad]]) {
+// Turning pad at the end of the coal branch (the waste branch ends on top of the dump)
+for (const [name, pad] of [['coalPad', COAL_YARD.pad]]) {
   const disc = new THREE.Mesh(new THREE.CircleGeometry(pad.r, 24).rotateX(-Math.PI / 2), roadMat);
   disc.position.set(pad.x, 0.12, pad.z);
   disc.receiveShadow = true;
@@ -519,7 +543,8 @@ for (const [name, pad] of [['coalPad', COAL_YARD.pad], ['wastePad', WASTE_DUMP.p
     let cur = null;
     if (Math.min(gl, gr) < p.y - BERM_HEIGHT) {
       const at = (off, up) => [p.x + L.x * side * off, p.y + up, p.z + L.z * side * off];
-      cur = { side, inner: at(ROAD_HW - 3, 0), top: at(ROAD_HW - 1.5, BERM_HEIGHT), outer: at(ROAD_HW, 0) };
+      // berm sits on the road's outer 2.5 m, so 26 m of the 30 m road stays usable
+      cur = { side, inner: at(ROAD_HW - 2, 0), top: at(ROAD_HW - 0.75, BERM_HEIGHT), outer: at(ROAD_HW + 0.5, 0) };
     }
     if (cur && prev && prev.side === cur.side) {
       pos.push(...prev.inner, ...prev.top, ...cur.top, ...prev.inner, ...cur.top, ...cur.inner);
@@ -697,15 +722,17 @@ function lumpyCone(radial, rows, seed) {
   return flat;
 }
 
-// Crusher shed with a low hopper on the pad side (trucks tip into it) and a feeder chute
+// Crusher shed with a hopper pocket set in the ground on its west side. Trucks reverse up to the
+// concrete stop wall (the "safety berm" of a tipping point) and tip over it into the pocket.
 addProp('crusherShed', [
   part(box(10, 8, 8), COLORS.shed, { at: [0, 4, 0] }),
   part(box(10.6, 0.4, 8.6), COLORS.steel, { at: [0, 8.2, 0] }),
   part(box(0.1, 3, 2.6), COLORS.dark, { at: [5.05, 1.5, 2] }),                        // door
-  part(box(6.4, 1.2, 6.4), COLORS.concrete, { at: [-8, 0.6, 0] }),                    // hopper base
-  part(cyl(4.4, 1.6, 2.4, 4), COLORS.steel, { at: [-8, 2.4, 0], rot: [0, Math.PI / 4, 0] }),   // hopper, top ≈ 3.6 m
-  part(box(5.4, 0.05, 5.4), COLORS.dark, { at: [-8, 3.62, 0] }),                       // hopper opening
-  part(box(3.2, 0.8, 1.6), COLORS.steel, { at: [-4.2, 1.0, 0] }),                     // feeder chute into the shed
+  part(box(7.4, 0.3, 9), COLORS.concrete, { at: [-8, 0.15, 0] }),                     // pocket collar
+  part(box(5.6, 0.06, 6.6), COLORS.dark, { at: [-8, 0.32, 0] }),                      // pocket opening
+  part(box(1, 1.2, 10), COLORS.concrete, { at: [-12, 0.6, 0] }),                      // stop wall
+  part(box(0.12, 0.3, 10.02), COLORS.yellow, { at: [-12.5, 0.95, 0] }),               // yellow stripe facing the trucks
+  part(box(10, 0.12, 12), COLORS.concrete, { at: [-17.5, 0.08, 0] }),                 // tipping apron
 ], COAL_YARD.crusher.x, 0, COAL_YARD.crusher.z);
 
 // Coal stockpile: a lumpy black cone (starts small; it will grow in a later stage)
@@ -740,17 +767,46 @@ scene.add(coalPile);
   scene.add(partsMesh('conveyorLegs', legs));
 }
 
-// ───────────────────────── Waste dump: a stepped, flat-topped beige mesa ─────────────────────────
-// Built at unit size (half-width 1, height 1) and scaled, so a later stage can grow it.
+// ───────────────────────── Waste dump: flat top, sloping sides, access ramp, crest berm ─────────────────────────
 {
-  const sq = Math.SQRT2;                                   // a 4-sided cylinder turned 45° is a square
-  const mesa = partsMesh('wasteDump', [
-    part(cyl(0.85 * sq, 1.0 * sq, 0.55, 4), COLORS.wasteRock, { at: [0, 0.275, 0], rot: [0, Math.PI / 4, 0] }),
-    part(cyl(0.5 * sq, 0.62 * sq, 0.45, 4), COLORS.wasteRock, { at: [0, 0.775, 0], rot: [0, Math.PI / 4, 0] }),
-  ]);
-  mesa.position.set(WASTE_DUMP.pile.x, 0, WASTE_DUMP.pile.z);
-  mesa.scale.set(14, 7, 16);                               // small starting dump: 28 × 32 m, 7 m high
-  scene.add(mesa);
+  const wasteMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+  const rock = new THREE.Color(COLORS.wasteRock), dust = new THREE.Color(COLORS.surface);
+  const shade = makeRandom(57);
+  const dump = new THREE.Mesh(buildGrid({
+    x0: 130, x1: 200, z0: -10, z1: 110, cell: 2,
+    skipCell: (x, z) => [-1, 1].every((dx) => [-1, 1].every((dz) => dumpH(x + dx, z + dz) <= 0)),
+    height: dumpH,
+    // beige dumped rock, a little dusty on the flat top
+    colorAt: (c, x, y) => c.copy(rock).lerp(dust, y > WASTE_DUMP.h - 0.01 ? 0.25 : 0).multiplyScalar(0.92 + shade() * 0.1),
+  }), wasteMat);
+  dump.castShadow = dump.receiveShadow = true;
+  dump.name = 'wasteDump';
+  scene.add(dump);
+
+  // Safety berm (1.5 m) round the crest, with a gap where the ramp arrives
+  const B = { in: 3.5, top: 2, out: 0.5, h: 1.5 }, y = WASTE_DUMP.h, { x0, x1, z0, z1 } = DUMP_CREST;
+  const gap = [WASTE_DUMP.rampX - ROAD_HW - 1, WASTE_DUMP.rampX + ROAD_HW + 1];
+  const pos = [];
+  // one straight berm from a to b; (nx, nz) points outward over the edge
+  const berm = (ax, az, bx, bz, nx, nz) => {
+    const at = (x, z, off, up) => [x + nx * off, y + up, z + nz * off];
+    const sec = (x, z) => [at(x, z, -B.in, 0), at(x, z, -B.top, B.h), at(x, z, -B.out, 0)];
+    const [a0, a1, a2] = sec(ax, az), [b0, b1, b2] = sec(bx, bz);
+    pos.push(...a0, ...a1, ...b1, ...a0, ...b1, ...b0, ...a1, ...a2, ...b2, ...a1, ...b2, ...b1);
+    pos.push(...a0, ...a2, ...a1, ...b0, ...b1, ...b2);                                  // end caps
+  };
+  berm(x0, z1, x1, z1, 0, 1);            // south crest: the tip head
+  berm(x0, z0, x0, z1, -1, 0);           // west
+  berm(x1, z0, x1, z1, 1, 0);            // east
+  berm(x0, z0, gap[0], z0, 0, -1);       // north, either side of the ramp
+  berm(gap[1], z0, x1, z0, 0, -1);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  const crestBerm = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0xB8A47E, flatShading: true, side: THREE.DoubleSide }));
+  crestBerm.castShadow = crestBerm.receiveShadow = true;
+  crestBerm.name = 'dumpBerm';
+  scene.add(crestBerm);
 }
 
 // ───────────────────────── Machines (Stage 3: built at real size, parked, not moving) ─────────────────────────
@@ -1031,8 +1087,8 @@ placeMachine(spotter, -2, 29, -4, -15);            // south of the pad, facing i
 
 // ───────────────────────── Mega Hauler route (one truck, empty loop) ─────────────────────────
 // The loop is split into legs that each end in a stop: pad → up to the waste dump → back down →
-// turn on the pit floor → back onto the pad. Trucks keep left, 5 m from the road centre line.
-const LANE_OFF = 5;          // truck edge ≈ 9.6 m out: clear of the berm top; ~0.8 m between two passing trucks
+// turn on the pit floor → back onto the pad. Trucks keep left, 6.5 m from the road centre line.
+const LANE_OFF = 6.5;        // truck edge ≈ 11.1 m out: 1.9 m clear of the berm; 3.8 m between two passing trucks
 const V_CRUISE = 9, V_SLOPE = 6, V_REV = 2.5;      // m/s ≈ 32, 22 and 9 km/h
 const A_LAT = 1.5, ACC = 1.0, DEC = 1.2;           // gentle turns, starts and stops (m/s²)
 const lerp = THREE.MathUtils.lerp;
@@ -1096,44 +1152,48 @@ function makeLeg(name, ctrl, { reverse = false, pause = 0, before, after } = {})
   return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause };
 }
 
-// Waste-dump turning circle: arrive in the left lane, go round with the centre on the right, leave in the other lane
+// Points along a circle round (cx, cz), from angle a0 to a1 (x = cx + R cos a, z = cz + R sin a)
+const arcPoints = (cx, cz, R, a0, a1, n = 16) =>
+  Array.from({ length: n + 1 }, (_, k) => { const a = lerp(a0, a1, k / n); return [cx + R * Math.cos(a), cz + R * Math.sin(a)]; });
+
+// S-bend of two equal arcs from (x0, z0) to (x1, z1), heading north (−z) at both ends, with x1 > x0
+function sBendNorth(x0, z0, x1, z1) {
+  const th = 2 * Math.atan((x1 - x0) / (z0 - z1)), R = (z0 - z1) / (2 * Math.sin(th));
+  return [...arcPoints(x0 + R, z0, R, Math.PI, Math.PI + th, 8), ...arcPoints(x1 - R, z1, R, th, 0, 8).slice(1)];
+}
+
 const HAUL_JUNCTION = nearestSample(roadPts, ...WASTE_ROAD_POINTS[0]);   // where the waste branch leaves the trunk
-const wasteTurn = (() => {
-  const c = WASTE_DUMP.pad, R = 12, b = wasteRoadPts;
-  let end = b.length - 1;
-  while (end > 0 && Math.hypot(b[end].x - c.x, b[end].z - c.z) < 24) end--;
-  const ux = c.x - b[end].x, uz = c.z - b[end].z, ul = Math.hypot(ux, uz);
-  const u = { x: ux / ul, z: uz / ul }, L = { x: u.z, z: -u.x };
-  const arc = (t0, t1) => {
-    const out = [];
-    for (let k = 0; k <= 8; k++) {
-      const t = lerp(t0, t1, k / 8);
-      out.push([c.x + R * (Math.cos(t) * L.x + Math.sin(t) * u.x), c.z + R * (Math.cos(t) * L.z + Math.sin(t) * u.z)]);
-    }
-    return out;
-  };
-  return { end, arcIn: arc(-0.7, Math.PI / 2), arcOut: arc(Math.PI / 2, Math.PI + 0.7) };
-})();
+const DUMP_RAMP_TOP = nearestSample(wasteRoadPts, WASTE_DUMP.rampX, DUMP_CREST.z0);
+// On the dump top: drive in, swing round a 14 m-radius half circle, stop facing north, then reverse
+// south up to the crest berm. The rear wheels stop ~2 m short of the berm; the body overhangs toward it.
+const DUMP_TURN = { cx: WASTE_DUMP.rampX - 7.5, cz: DUMP_CREST.z0 + 10, R: 14 };
+const DUMP_TIP = { x: DUMP_TURN.cx - DUMP_TURN.R, z: DUMP_CREST.z1 - 11.5 };
 
 const haulRoute = [
-  // 1. off the pad, up the ramp, along the waste branch, round to the far side of the turning circle
-  makeLeg('toDump', [
-    [4, 14], [-6, 14.5], [-16, 18], [-26, 22.8],
-    ...lanePoints(roadPts, 10, HAUL_JUNCTION),
-    ...lanePoints(wasteRoadPts, 4, wasteTurn.end),
-    ...wasteTurn.arcIn,
-  ], { pause: 3, after: wasteTurn.arcOut[1] }),           // (the body tips here from Stage 5)
-  // 2. round the circle, back along the branch, down the ramp, then turn left (north) on the pit floor
+  // 1. off the pad, up the pit ramp, along the waste branch and up the dump ramp, round the half circle on top
+  makeLeg('toDumpTop', [
+    [4, 14], [-0.1, 14.3], [-4.3, 15.3], [-12.4, 18.7], [-20.4, 23.3], [-28.4, 28.2], [-36.4, 32.6],   // ~14 m-radius S onto the lane
+    ...lanePoints(roadPts, 16, HAUL_JUNCTION),
+    ...lanePoints(wasteRoadPts, 4, DUMP_RAMP_TOP),
+    [DUMP_TURN.cx + DUMP_TURN.R, DUMP_TURN.cz - 5],
+    ...arcPoints(DUMP_TURN.cx, DUMP_TURN.cz, DUMP_TURN.R, 0, Math.PI),
+  ], { pause: 1, before: [12, 14], after: [DUMP_TIP.x, DUMP_TURN.cz - 6] }),
+  // 2. reverse straight south to the crest berm (the body tips over the edge here from Stage 5)
+  makeLeg('toCrest', [
+    [DUMP_TIP.x, DUMP_TURN.cz], [DUMP_TIP.x, DUMP_TIP.z],
+  ], { reverse: true, pause: 3 }),
+  // 3. forward off the dump, down both ramps, then a 16 m-radius left turn on the pit floor
   makeLeg('toPit', [
-    ...wasteTurn.arcOut,
-    ...lanePoints(wasteRoadPts, wasteTurn.end, 4),
+    ...sBendNorth(DUMP_TIP.x, DUMP_TIP.z, WASTE_DUMP.rampX - LANE_OFF, wasteRoadPts[DUMP_RAMP_TOP].z),   // ~25 m-radius S
+    ...lanePoints(wasteRoadPts, DUMP_RAMP_TOP - 2, 4),
     ...lanePoints(roadPts, HAUL_JUNCTION, 8),
-    [-20.7, 7.3], [-16, -4], [-16, -16],      // quarter turn of ~16 m radius
-  ], { pause: 1.5, before: wasteTurn.arcIn.at(-2) }),
-  // 3. back in a wide curve onto the loading pad, stopping facing the road (body toward the digger)
+    ...arcPoints(-39, 3, 16, 1.05, 0, 8),
+    [-23, -16],
+  ], { pause: 1.5 }),
+  // 4. back in a 27 m-radius curve onto the loading pad, stopping facing the road (body toward the digger)
   makeLeg('ontoPad', [
-    [-16, -16], [-16, 0], [-14.1, 7], [-9, 12.1], [-2, 14], [4, 14],
-  ], { reverse: true, pause: 4 }),   // (loading happens here from Stage 5)
+    [-23, -16], ...arcPoints(4, -13, 27, Math.PI, Math.PI / 2),
+  ], { reverse: true, pause: 4, after: [10, 14] }),   // (loading happens here from Stage 5)
 ];
 
 // Drive state: where the truck is on its route
@@ -1258,7 +1318,7 @@ window.addEventListener('resize', () => {
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.1);     // no big jumps after a hidden tab
+  const dt = Math.min(clock.getDelta(), 0.1) * TIME_SCALE;     // no big jumps after a hidden tab
   updateHauler(dt);
   controls.update();
   limitCamera();

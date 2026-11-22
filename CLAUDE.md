@@ -33,7 +33,7 @@ You are building a small, single-file 3D "simulation world" for kids (and curiou
 - **Loading spot:** on the pit floor, next to the digger, marked by a flat pad. A **queue marker** (small sign "WAIT HERE") sits ~40 m back along the road.
 - **Two destinations** (the haul road reaches both):
   - **Coal stockpile:** a black cone pile on the rim next to a small grey crusher shed, with a short sloped conveyor running from the crusher to the top of the pile.
-  - **Waste dump:** a beige flat-topped pile (stepped, like a low mesa), further from the pit.
+  - **Waste dump:** a beige flat-topped dump, further from the pit, with an access ramp and a safety berm along its crest. Trucks tip over the edge from the top.
 - **Service lane + crossing:** a narrow side track for the small pickup that crosses the haul road once near the rim, at a "STOP — big trucks first" sign.
 - **Site office:** one small white cabin on the rim, with a flagpole.
 - **Water point:** a small tank tower on the rim where the water truck refills.
@@ -182,5 +182,9 @@ Three live numbers, big and readable:
 - "3 benches" = 3 steps of 8 m; pit floor at −24 m. Bench tops 16 m wide, walls 4 m across.
 - Layer depths: topsoil 0 to −1.5 m, clay to −5 m, sandstone to −16 m, coal seam −16 to −26 m (the whole bottom step, and under the floor), floor rock below −26 m. Flat bench tops and the floor are dusted grey; the walls show the clean stripes.
 - Haul road: pit → ramp → rim, then splits at a junction: north-east branch to the coal yard, south-east branch to the waste dump. The service lane loops around the coal yard and crosses only the coal branch, once.
+- Stage 4b road tweaks: haul road 30 m wide; berms sit on its outer 2.5 m, so 26 m is usable. Trucks keep left, 6.5 m from the centre line (≈3.7 m between two passing trucks). The bend at the foot of the ramp is a 32 m-radius arc; the ramp is 280 m at ~8.6%.
+- Waste dump = a real end-tipping dump: flat top (crest 48 × 48 m, 7 m high) with a 60 m access ramp and a 1.5 m safety berm round the crest. Trucks drive up, turn on top, reverse to the south crest berm and tip over the edge; the dump grows outward from that edge.
+- Coal yard = a hopper pocket set in the ground beside the crusher shed, with a concrete stop wall (the tipping point's safety berm) and apron. Trucks circle the turning pad, then reverse straight up to the wall and tip into the pocket.
+- `TIME_SCALE` (default 3.85): machines move at real speeds, sped up so one Mega Hauler loop takes ~60 s at 1×. All movement and timers use it; the speed buttons multiply it.
 - Signs are drawn larger than real life (~3 m boards) so kids can spot them.
 - Local preview: `python -m http.server 8123` in this folder → http://127.0.0.1:8123/
