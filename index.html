@@ -1029,6 +1029,154 @@ const flagPickup = makeFlagPickup();
 const spotter = makeSpotter();
 placeMachine(spotter, -2, 29, -4, -15);            // south of the pad, facing it, outside the digger's swing
 
+// ───────────────────────── Mega Hauler route (one truck, empty loop) ─────────────────────────
+// The loop is split into legs that each end in a stop: pad → up to the waste dump → back down →
+// turn on the pit floor → back onto the pad. Trucks keep left, 5 m from the road centre line.
+const LANE_OFF = 5;          // truck edge ≈ 9.6 m out: clear of the berm top; ~0.8 m between two passing trucks
+const V_CRUISE = 9, V_SLOPE = 6, V_REV = 2.5;      // m/s ≈ 32, 22 and 9 km/h
+const A_LAT = 1.5, ACC = 1.0, DEC = 1.2;           // gentle turns, starts and stops (m/s²)
+const lerp = THREE.MathUtils.lerp;
+const angleDiff = (a, b) => ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;   // shortest turn from a to b
+const lerpAngle = (a, b, t) => a + angleDiff(a, b) * t;
+
+// Lane centre points of a road from sample `from` to `to` (left of the travel direction).
+// Smoothed a little so the inside lane of a tight bend still has a truck-sized turning circle.
+function lanePoints(pts, from, to, every = 2) {
+  const dir = Math.sign(to - from);
+  let lane = [];
+  for (let i = from; ; i += dir) {
+    const L = leftAt(pts, i);
+    lane.push([pts[i].x + dir * L.x * LANE_OFF, pts[i].z + dir * L.z * LANE_OFF]);
+    if (i === to) break;
+  }
+  for (let pass = 0; pass < 12; pass++) {
+    lane = lane.map((p, i) => (i === 0 || i === lane.length - 1) ? p
+      : [(lane[i - 1][0] + 2 * p[0] + lane[i + 1][0]) / 4, (lane[i - 1][1] + 2 * p[1] + lane[i + 1][1]) / 4]);
+  }
+  return lane.filter((_, i) => i % every === 0 || i === lane.length - 1);
+}
+
+const onLoadingPad = (x, z) => Math.abs(x - LOADING_PAD.x) < LOADING_PAD.w / 2 && Math.abs(z - LOADING_PAD.z) < LOADING_PAD.d / 2;
+
+// One leg: smooth curve sampled every ~1 m with height, heading, tilt and a speed limit per sample.
+// `before` / `after` are the neighbouring points just outside the leg; they set its heading at each end
+// (by default the curve carries straight on), so the truck never snaps round at a stop.
+function makeLeg(name, ctrl, { reverse = false, pause = 0, before, after } = {}) {
+  const mirror = (p, q) => [2 * p[0] - q[0], 2 * p[1] - q[1]];
+  const all = [before ?? mirror(ctrl[0], ctrl[1]), ...ctrl, after ?? mirror(ctrl.at(-1), ctrl.at(-2))];
+  const full = new THREE.CatmullRomCurve3(all.map(([x, z]) => new THREE.Vector3(x, 0, z)), false, 'centripetal');
+  const dense = full.getSpacedPoints(Math.ceil(full.getLength() * 4));
+  const near = ([x, z]) => nearestSample(dense, x, z);
+  const inner = dense.slice(near(ctrl[0]), near(ctrl.at(-1)) + 1);   // drop the parts beyond the end points
+  const curve = new THREE.CatmullRomCurve3(inner, false, 'centripetal');
+  const len = curve.getLength(), n = Math.max(2, Math.round(len)), step = len / n;
+  const pts = curve.getSpacedPoints(n);
+  const y = pts.map((p) => groundAt(p.x, p.z) + (onLoadingPad(p.x, p.z) ? 0.2 : 0.12));
+  const at = (i) => clamp(i, 0, n);
+  const yaw = [], pitch = [], height = [], vmax = [];
+  pts.forEach((p, i) => {
+    const k = Math.max(Math.min(2, i, n - i), 1);                      // centred window, shorter near the ends
+    const a = pts[at(i - k)], b = pts[at(i + k)], sign = reverse ? -1 : 1;
+    yaw.push(Math.atan2(-(b.z - a.z) * sign, (b.x - a.x) * sign));
+    // wheels about 4 m ahead of and behind the middle set the tilt and the height
+    const iF = at(i + 4 * sign), iB = at(i - 4 * sign);
+    pitch.push(Math.atan2(y[iF] - y[iB], Math.max(Math.abs(iF - iB) * step, step)));
+    height.push((y[iF] + y[iB]) / 2);
+    // slow down for tight bends and slopes
+    const c = pts[at(i - 3)], d = pts[at(i + 3)];
+    const turn = Math.abs(angleDiff(Math.atan2(p.z - c.z, p.x - c.x), Math.atan2(d.z - p.z, d.x - p.x)));
+    const radius = turn > 1e-4 ? (c.distanceTo(p) + p.distanceTo(d)) / turn : Infinity;
+    let v = Math.min(V_CRUISE, Math.sqrt(A_LAT * radius));
+    if (Math.abs(y[at(i + 3)] - y[at(i - 3)]) > 6 * step * 0.03) v = Math.min(v, V_SLOPE);
+    vmax.push(reverse ? V_REV : v);
+  });
+  // brake smoothly to a stop at the end of the leg
+  vmax[n] = 0.4;
+  for (let i = n - 1; i >= 0; i--) vmax[i] = Math.min(vmax[i], Math.sqrt(vmax[i + 1] ** 2 + 2 * DEC * step));
+  return { name, pts, len, n, step, yaw, pitch, height, vmax, reverse, pause };
+}
+
+// Waste-dump turning circle: arrive in the left lane, go round with the centre on the right, leave in the other lane
+const HAUL_JUNCTION = nearestSample(roadPts, ...WASTE_ROAD_POINTS[0]);   // where the waste branch leaves the trunk
+const wasteTurn = (() => {
+  const c = WASTE_DUMP.pad, R = 12, b = wasteRoadPts;
+  let end = b.length - 1;
+  while (end > 0 && Math.hypot(b[end].x - c.x, b[end].z - c.z) < 24) end--;
+  const ux = c.x - b[end].x, uz = c.z - b[end].z, ul = Math.hypot(ux, uz);
+  const u = { x: ux / ul, z: uz / ul }, L = { x: u.z, z: -u.x };
+  const arc = (t0, t1) => {
+    const out = [];
+    for (let k = 0; k <= 8; k++) {
+      const t = lerp(t0, t1, k / 8);
+      out.push([c.x + R * (Math.cos(t) * L.x + Math.sin(t) * u.x), c.z + R * (Math.cos(t) * L.z + Math.sin(t) * u.z)]);
+    }
+    return out;
+  };
+  return { end, arcIn: arc(-0.7, Math.PI / 2), arcOut: arc(Math.PI / 2, Math.PI + 0.7) };
+})();
+
+const haulRoute = [
+  // 1. off the pad, up the ramp, along the waste branch, round to the far side of the turning circle
+  makeLeg('toDump', [
+    [4, 14], [-6, 14.5], [-16, 18], [-26, 22.8],
+    ...lanePoints(roadPts, 10, HAUL_JUNCTION),
+    ...lanePoints(wasteRoadPts, 4, wasteTurn.end),
+    ...wasteTurn.arcIn,
+  ], { pause: 3, after: wasteTurn.arcOut[1] }),           // (the body tips here from Stage 5)
+  // 2. round the circle, back along the branch, down the ramp, then turn left (north) on the pit floor
+  makeLeg('toPit', [
+    ...wasteTurn.arcOut,
+    ...lanePoints(wasteRoadPts, wasteTurn.end, 4),
+    ...lanePoints(roadPts, HAUL_JUNCTION, 8),
+    [-20.7, 7.3], [-16, -4], [-16, -16],      // quarter turn of ~16 m radius
+  ], { pause: 1.5, before: wasteTurn.arcIn.at(-2) }),
+  // 3. back in a wide curve onto the loading pad, stopping facing the road (body toward the digger)
+  makeLeg('ontoPad', [
+    [-16, -16], [-16, 0], [-14.1, 7], [-9, 12.1], [-2, 14], [4, 14],
+  ], { reverse: true, pause: 4 }),   // (loading happens here from Stage 5)
+];
+
+// Drive state: where the truck is on its route
+const truck1 = haulers[0];
+truck1.rotation.order = 'YZX';     // turn (y) after tilting along its length (z)
+const drive = { leg: haulRoute.length - 1, s: haulRoute.at(-1).len, v: 0, wait: 2, blend: 0, from: null };
+
+function poseOnLeg(obj, leg, s) {
+  const f = clamp(s / leg.step, 0, leg.n), i = Math.min(Math.floor(f), leg.n - 1), t = f - i;
+  const a = leg.pts[i], b = leg.pts[i + 1];
+  obj.position.set(lerp(a.x, b.x, t), lerp(leg.height[i], leg.height[i + 1], t), lerp(a.z, b.z, t));
+  obj.rotation.y = lerpAngle(leg.yaw[i], leg.yaw[i + 1], t);
+  obj.rotation.z = lerp(leg.pitch[i], leg.pitch[i + 1], t);
+}
+
+function updateHauler(dt) {
+  const d = drive;
+  if (d.wait > 0) {
+    d.wait -= dt;
+    if (d.wait <= 0) {
+      d.leg = (d.leg + 1) % haulRoute.length; d.s = 0; d.v = 0;
+      // ease out of any small mismatch between where one leg ends and the next begins
+      d.from = { x: truck1.position.x, z: truck1.position.z, yaw: truck1.rotation.y }; d.blend = 1;
+    }
+  } else {
+    const leg = haulRoute[d.leg], i = Math.min(Math.round(d.s / leg.step), leg.n);
+    d.v = Math.max(Math.min(d.v + ACC * dt, leg.vmax[i]), 0.3);
+    const ds = Math.min(d.v * dt, leg.len - d.s);
+    d.s += ds;
+    truck1.userData.wheels.forEach((w) => { w.rotation.z -= (leg.reverse ? -ds : ds) / 2.0; });
+    if (d.s >= leg.len) d.wait = leg.pause;
+  }
+  poseOnLeg(truck1, haulRoute[d.leg], d.s);
+  if (d.blend > 0) {
+    d.blend = Math.max(d.blend - dt, 0);
+    const t = d.blend * d.blend;
+    truck1.position.x = lerp(truck1.position.x, d.from.x, t);
+    truck1.position.z = lerp(truck1.position.z, d.from.z, t);
+    truck1.rotation.y = lerpAngle(truck1.rotation.y, d.from.yaw, t);
+  }
+}
+updateHauler(0);
+
 // ───────────────────────── Clouds (one instanced mesh of low-poly puffs) ─────────────────────────
 const puffs = [];
 for (let k = 0; k < 12; k++) {
@@ -1108,7 +1256,10 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);     // no big jumps after a hidden tab
+  updateHauler(dt);
   controls.update();
   limitCamera();
   renderer.render(scene, camera);
