@@ -115,7 +115,7 @@ const COAL_YARD = { pad: { x: 132, z: -104, r: 18 }, crusher: { x: 162, z: -93 }
 // its north side. Trucks turn on top and reverse to a safety berm on the south crest to tip over the edge.
 const WASTE_DUMP = { cx: 166, cz: 76, hw: 24, h: 7, slope: 8, rampX: 174, rampZ0: -8 };
 const SERVICE_LANE = { cx: 148, cz: -122, r: 46, hw: 3 };  // loop around the coal yard, crosses the coal branch once
-const OFFICE = { x: 140, z: 28 };
+const OFFICE = { x: 148, z: -176 };   // just outside the service-lane loop, door facing the lane; the pickup stops here
 const WATER_TOWER = { x: 30, z: -94 };
 
 // Small seeded random so the world looks the same on every load
@@ -563,24 +563,37 @@ for (const [name, pad] of [['coalPad', COAL_YARD.pad]]) {
   scene.add(berms);
 }
 
-// Service lane: a narrow loop around the coal yard for the small pickup.
-// The pickup will drive it in increasing-index order; it crosses the coal branch of the haul road once.
-const lanePts = [];
-for (let k = 0; k < 144; k++) {
-  const a = (k / 144) * Math.PI * 2;
-  lanePts.push(new THREE.Vector3(SERVICE_LANE.cx + Math.cos(a) * SERVICE_LANE.r, 0, SERVICE_LANE.cz + Math.sin(a) * SERVICE_LANE.r));
-}
+// Service lane: a narrow loop around the coal yard for the small pickup, driven in increasing-index order.
+// It follows a circle, except where it meets the coal branch: there it runs straight across the road at
+// a right angle, so the crossing is short and square-on. It touches the haul road only there.
+const lanePts = (() => {
+  const { cx, cz, r } = SERVICE_LANE, TAU = Math.PI * 2, at = (a) => [cx + r * Math.cos(a), cz + r * Math.sin(a)];
+  let meet = 0, bd = Infinity;                                   // where the circle meets the coal branch
+  for (let k = 0; k < 720; k++) { const d = nearestOnPath(coalRoadPts, ...at(k / 720 * TAU)).d; if (d < bd) { bd = d; meet = k / 720 * TAU; } }
+  const P = at(meet), i = nearestSample(coalRoadPts, ...P), n = coalRoadPts.length;
+  const a0 = coalRoadPts[Math.max(i - 2, 0)], b0 = coalRoadPts[Math.min(i + 2, n - 1)], tl = Math.hypot(b0.x - a0.x, b0.z - a0.z);
+  let nx = -(b0.z - a0.z) / tl, nz = (b0.x - a0.x) / tl;         // across the road…
+  if (nx * -Math.sin(meet) + nz * Math.cos(meet) < 0) { nx = -nx; nz = -nz; }   // …in the lane's direction of travel
+  // turned 18° off square so the run-in on the far side points away from the waste road (keeps 3.6 m clear)
+  { const t = -18 * Math.PI / 180, c = Math.cos(t), s = Math.sin(t); [nx, nz] = [nx * c - nz * s, nx * s + nz * c]; }
+  const SPAN = 0.9, IN = 18, OUT = 24, ctrl = [];   // a short run-in: the waste road is close on that side
+  for (let k = 0; k <= 20; k++) ctrl.push(at(meet + SPAN + (TAU - 2 * SPAN) * k / 20));
+  for (const t of [-IN, -IN / 2, 0, OUT / 2, OUT]) ctrl.push([P[0] + nx * t, P[1] + nz * t]);
+  const curve = new THREE.CatmullRomCurve3(ctrl.map(([x, z]) => new THREE.Vector3(x, 0, z)), true, 'centripetal');
+  return curve.getSpacedPoints(Math.round(curve.getLength() / 2)).slice(0, -1);
+})();
 const serviceLane = new THREE.Mesh(buildRibbon(lanePts, SERVICE_LANE.hw, 0.2, true), laneMat);
 serviceLane.receiveShadow = true;
 serviceLane.name = 'serviceLane';
 scene.add(serviceLane);
 
-// The crossing is the lane point closest to a haul road. The pickup must stop at the last point
-// before it, while still ROAD_HW + 4 m from the road's centre line.
-const laneRoadDist = lanePts.map((p) => distToRoads(p.x, p.z));
+// The crossing is the lane point closest to the coal branch. The pickup stops at the last point
+// before it that is still 2 m outside the road edge (ROAD_HW + 2 from the centre line).
+// (measured to the coal branch only: the lane passes the waste branch too, but never touches it)
+const laneRoadDist = lanePts.map((p) => nearestOnPath(coalRoadPts, p.x, p.z).d);
 const LANE_CROSS = laneRoadDist.indexOf(Math.min(...laneRoadDist));
 let LANE_STOP = LANE_CROSS;
-while (laneRoadDist[LANE_STOP] <= ROAD_HW + 4) LANE_STOP = (LANE_STOP - 1 + lanePts.length) % lanePts.length;
+while (laneRoadDist[LANE_STOP] <= ROAD_HW + 2) LANE_STOP = (LANE_STOP - 1 + lanePts.length) % lanePts.length;
 
 // ───────────────────────── Signs (text drawn on a canvas in code) ─────────────────────────
 const SIGN_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
@@ -682,7 +695,7 @@ addProp('siteOffice', [
   part(box(1.8, 1, 0.1), COLORS.glass, { at: [-3.5, 2.2, 2.02] }),
   part(cyl(0.08, 0.1, 9, 6), 0xDADADA, { at: [8, 4.5, 0] }),
   part(box(2, 1.3, 0.05), COLORS.yellow, { at: [9.05, 8.2, 0] }),
-], OFFICE.x, 0, OFFICE.z);
+], OFFICE.x, 0, OFFICE.z, Math.PI);
 
 // Water tower: steel legs with braces, a white tank, a roof cone and a filling spout toward the road (+z)
 {
@@ -1070,7 +1083,7 @@ function makeSpotter() {
 }
 
 // ── Start spots (nothing on a haul-road lane, the pad approach or the crossing) ──
-const SERVICE_LANE_START = (LANE_CROSS + lanePts.length / 2) % lanePts.length;   // far side of the loop from the crossing
+const SERVICE_LANE_START = (LANE_CROSS + Math.floor(lanePts.length / 2)) % lanePts.length;   // far side of the loop from the crossing
 const digger = makeDigger();
 placeMachine(digger, 16, 2, 1, 0);                 // pit floor between the pad and the east digging face
 const haulers = [makeMegaHauler('megaHauler1'), makeMegaHauler('megaHauler2')];
@@ -1583,10 +1596,67 @@ const drivers = [makeDriver(haulers[0], 61), makeDriver(haulers[1], 62)];
   poseOnLeg(t2.truck, ROUTES.rock[1], t2.s);
 }
 
+// ───────────────────────── Flag pickup: calm loop on the service lane, gives way at the crossing ─────────────────────────
+// It drives the lane in increasing-index order and makes two stops each lap:
+//  • the stop line: it always stops, waits until no Mega Hauler is within ~60 m of the crossing, then
+//    crosses briskly without stopping. Big trucks never stop for it.
+//  • beside the site office: a short break (5 s at 1×).
+const PICKUP = { len: 5.2, wheelR: 0.4, cruise: 1.7, crossSpeed: 8, acc: 1.5, crossAcc: 2.5, dec: 2, clear: 60,
+  minStop: 1.5, officeStop: 5 * TIME_SCALE, blink: 4 };
+const LANE_N = lanePts.length;
+const LANE_STEP = lanePts[0].distanceTo(lanePts[1]), LANE_LEN = LANE_STEP * LANE_N;   // evenly spaced points
+let LANE_EXIT = LANE_CROSS;                                     // first lane point past the road
+while (laneRoadDist[LANE_EXIT] <= ROAD_HW + 2) LANE_EXIT = (LANE_EXIT + 1) % LANE_N;
+const laneS = (i) => i * LANE_STEP;                              // distance round the loop to lane point i
+const laneAhead = (from, to) => (((to - from) % LANE_LEN) + LANE_LEN) % LANE_LEN;
+const STOP_S = laneS(LANE_STOP) - PICKUP.len / 2;               // centre when the front bumper is at the stop line
+const CLEAR_S = laneS(LANE_EXIT) + PICKUP.len / 2;              // centre once the tailgate is past the crossing
+const OFFICE_S = laneS(nearestSample(lanePts, OFFICE.x, OFFICE.z));
+const PICKUP_STOPS = [{ s: STOP_S, kind: 'line' }, { s: OFFICE_S, kind: 'office' }];
+const crossPoint = lanePts[LANE_CROSS];
+const pickup = { s: laneS(SERVICE_LANE_START), v: 0, state: 'drive', stop: 0, t: 0, blinkT: 0 };
+pickup.stop = laneAhead(pickup.s, STOP_S) < laneAhead(pickup.s, OFFICE_S) ? 0 : 1;
+
+const crossingClear = () => drivers.every((d) =>
+  Math.hypot(d.truck.position.x - crossPoint.x, d.truck.position.z - crossPoint.z) > PICKUP.clear);
+
+function updatePickup(dt) {
+  const p = pickup, crossing = p.state === 'crossing', stop = PICKUP_STOPS[p.stop];
+  let limit = crossing ? PICKUP.crossSpeed : PICKUP.cruise, stopAt = Infinity;
+  if (p.state === 'drive') {
+    const toStop = laneAhead(p.s, stop.s);
+    if (toStop < 30) {                                          // brake to the stop point
+      limit = Math.min(limit, Math.sqrt(2 * PICKUP.dec * toStop));
+      stopAt = toStop;
+      if (toStop < 0.02) { p.state = 'stopped'; p.s = stop.s; p.t = 0; p.v = 0; }
+    }
+  }
+  if (p.state === 'stopped') {
+    p.t += dt;
+    limit = 0;
+    const done = stop.kind === 'office' ? p.t >= PICKUP.officeStop : p.t >= PICKUP.minStop && crossingClear();
+    if (done) { p.state = stop.kind === 'line' ? 'crossing' : 'drive'; p.stop = (p.stop + 1) % PICKUP_STOPS.length; }
+  }
+  if (p.state === 'crossing' && laneAhead(STOP_S, p.s) >= laneAhead(STOP_S, CLEAR_S) - 0.01) p.state = 'drive';
+  p.v = Math.min(p.v + (crossing ? PICKUP.crossAcc : PICKUP.acc) * dt, limit);
+  const ds = Math.max(Math.min(p.v * dt, stopAt), 0);
+  p.s = (p.s + ds) % LANE_LEN;
+  flagPickup.userData.wheels.forEach((w) => { w.rotation.z -= ds / PICKUP.wheelR; });
+  // pose along the lane
+  const f = p.s / LANE_STEP, i = Math.floor(f) % LANE_N, j = (i + 1) % LANE_N, t = f - Math.floor(f);
+  const A = lanePts[i], B = lanePts[j];
+  flagPickup.position.set(lerp(A.x, B.x, t), 0.2, lerp(A.z, B.z, t));
+  flagPickup.rotation.y = Math.atan2(-(B.z - A.z), B.x - A.x);
+  // the light on top of the whip pole blinks
+  p.blinkT += dt;
+  flagPickup.userData.flagLight.material.emissiveIntensity = (p.blinkT % PICKUP.blink) < PICKUP.blink / 2 ? 1.6 : 0.05;
+}
+
 function updateMine(dt) {
   drivers.forEach((d) => updateTruck(d, dt));
   updateDigger(dt);
   updateSpotter(dt, drivers);
+  updatePickup(dt);
   updateFalling(dt);
 }
 
