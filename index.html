@@ -42,8 +42,14 @@
     position: absolute; top: 10px; right: 10px; width: 44px; height: 44px; border: 0; border-radius: 22px;
     background: #f0f0f0; color: var(--ink); font-size: 20px; cursor: pointer;
   }
-  @media (max-width: 600px) {     /* narrow screens: the card sits at the bottom, clear of the object */
-    #card { left: 12px; right: 12px; top: auto; bottom: 12px; transform: none; width: auto; padding: 14px 16px 16px; font-size: 16px; }
+  #secretsBtn {
+    position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); min-height: 52px; padding: 0 20px;
+    border: 0; border-radius: 26px; background: var(--card); color: var(--ink); font: 700 18px var(--font);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15); cursor: pointer; user-select: none;
+  }
+  #secretsBtn.on { background: var(--yellow); }
+  @media (max-width: 600px) {     /* narrow screens: the card sits at the bottom (above the Secrets button), clear of the object */
+    #card { left: 12px; right: 12px; top: auto; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); transform: none; width: auto; padding: 14px 16px 16px; font-size: 16px; }
     #cardEmoji { font-size: 40px; }
     #card h2 { font-size: 20px; margin-top: 4px; }
   }
@@ -60,6 +66,7 @@
 <body>
 <div id="title"><h1>Big <span>Dig</span></h1><p>A day inside a giant coal mine</p></div>
 <div id="card" hidden><button id="cardClose" aria-label="Close">✕</button><div id="cardEmoji"></div><h2 id="cardTitle"></h2><p id="cardText"></p></div>
+<button id="secretsBtn" aria-pressed="false">🔍 Secrets</button>
 <div id="banner"><b>This part is done! 🎉</b>The rock will go back and trees will be planted. Starting again…</div>
 
 <script type="module">
@@ -2152,9 +2159,9 @@ const CARDS = {
   digger:   ['🦾', 'Big Digger', "I dig the rock first, then the black coal underneath. I fill a Mega Hauler in about 4 scoops. I never swing my bucket over a truck's cab — that keeps the driver safe."],
   pickup:   ['🚩', 'Flag Pickup', "Mega Haulers are so big they can't see small cars close to them. That's why I carry a tall flag with a light — so the big truck drivers can spot me. On mine roads, big trucks always go first."],
   water:    ['💧', 'Water Truck', "Coal mines are very dusty. I spray water on the roads so dust doesn't fly into the air."],
-  spotter:  ['🦺', 'Spotter', "I'm the spotter! I watch the area around the digger and use my flag and hand signals to tell drivers when it's safe."],
+  spotter:  ['🦺', 'Spotter', "I'm the spotter! I watch the area around the digger and use my flag and hand signals to tell drivers when it's safe. People on foot always stay out of the digger's swing area."],
   seam:     ['⚫', 'Coal seam', "This black stripe is coal! It was made from plants that were buried and squashed for millions of years. Above it is rock we must move first."],
-  coalYard: ['⚫', 'Coal stockpile', "Trucks tip the coal into a hopper in the ground. The crusher breaks it into small pieces, and a conveyor belt carries it up to the pile. Later it's taken away — much of it is burned in power stations to make electricity."],
+  coalYard: ['⚫', 'Coal stockpile', "Trucks tip coal into a hopper. The crusher breaks it up and a conveyor belt carries it to the pile. Much of it is burned in power stations to make electricity."],
   dump:     ['🪨', 'Waste dump', "This isn't rubbish — it's the rock that was on top of the coal. One day it can be put back and planted with trees."],
 };
 // Machines and people get an invisible hit sphere that moves with them (at = centre in the object's own
@@ -2307,11 +2314,136 @@ function updatePicking(t1) {
   el.addEventListener('pointercancel', (e) => up(e, true));
 }
 
+// ───────────────────────── Secrets: blind spots, danger circle, flag highlight ─────────────────────────
+// Off by default. Blind spots and the danger circle are see-through red, laid on the ground (their
+// points follow the ground's height); the flag on the pickup gets a pulsing glow that stays the same
+// size on screen, so it shows how the flag pokes up where a truck driver can see it.
+const SECRETS = { lift: 0.3, red: 0xFF3B30, opacity: 0.38, ringW: 1.2, drapeEvery: 0.06 };
+SECRETS.ring = DIG.pinR + DIG.L1 + DIG.L2 + 0.5;            // furthest the bucket can reach, plus a little
+const secretMat = new THREE.MeshBasicMaterial({ color: SECRETS.red, transparent: true, opacity: SECRETS.opacity,
+  depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
+let secretsOn = false;
+
+// Blind spots in the truck's own space (+x forward, +z to its right; the cab is at the front left):
+// close in front, all down the right side, and behind. Each patch is four corners, split into ~1.5 m cells.
+const BLIND_PATCHES = [
+  [[7.4, -1.5], [15, -1.5], [15, 10.5], [7.4, 10.5]],      // in front, from just left of the middle across to the right
+  [[-3, 4.8], [7.4, 4.8], [7.4, 10.5], [-3, 10.5]],        // along the right side
+  [[-7.4, -4.8], [-7.4, 4.8], [-20, 6.5], [-20, -6.5]],    // behind
+];
+function blindSpotGeometry() {
+  const pos = [], index = [];
+  for (const [a, b, c, d] of BLIND_PATCHES) {
+    const nu = Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 1.5), nv = Math.ceil(Math.hypot(d[0] - a[0], d[1] - a[1]) / 1.5), base = pos.length / 3;
+    for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) {
+      const u = i / nu, v = j / nv;
+      pos.push(lerp(lerp(a[0], b[0], u), lerp(d[0], c[0], u), v), 0, lerp(lerp(a[1], b[1], u), lerp(d[1], c[1], u), v));
+    }
+    for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+      const k = base + j * (nu + 1) + i;
+      index.push(k, k + nu + 1, k + 1, k + 1, k + nu + 1, k + nu + 2);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(index);
+  return g;
+}
+const blindSpots = haulers.map((h) => {
+  const m = new THREE.Mesh(blindSpotGeometry(), secretMat);
+  m.name = 'blindSpot'; m.visible = false; m.renderOrder = 2; m.frustumCulled = false;
+  m.userData.t = 0;
+  h.add(m);
+  return m;
+});
+// Lay a blind spot on the ground: each point's height (in the truck's space) so it sits just above the ground
+const _bw = new THREE.Vector3();
+function drapeBlindSpot(m) {
+  const truck = m.parent, pos = m.geometry.attributes.position;
+  truck.updateMatrixWorld();
+  const upY = truck.matrixWorld.elements[5] || 1;
+  for (let i = 0; i < pos.count; i++) {
+    _bw.set(pos.getX(i), 0, pos.getZ(i)).applyMatrix4(truck.matrixWorld);
+    pos.setY(i, (groundAt(_bw.x, _bw.z) + SECRETS.lift - _bw.y) / upY);
+  }
+  pos.needsUpdate = true;
+}
+
+// Danger circle round the digger's swing area: a red band on the ground
+const dangerRing = (() => {
+  const n = 120, pos = [], index = [], { x, z } = digger.position;
+  for (let i = 0; i <= n; i++) {
+    const a = i / n * Math.PI * 2;
+    for (const r of [SECRETS.ring - SECRETS.ringW, SECRETS.ring]) {
+      const px = x + r * Math.cos(a), pz = z + r * Math.sin(a);
+      pos.push(px, groundAt(px, pz) + SECRETS.lift, pz);
+    }
+    if (i < n) index.push(2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 1, 2 * i + 3, 2 * i + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(index);
+  const m = new THREE.Mesh(g, secretMat);
+  m.name = 'dangerCircle'; m.visible = false; m.renderOrder = 2;
+  scene.add(m);
+  return m;
+})();
+// Its label, on the circle between the loading pad and the face (clear of the pad and the roads),
+// the same size on screen whatever the zoom (~150 px wide on an 800 px tall screen)
+const DANGER_LABEL = { angle: 75, text: '🚶 People stay out!', w: 0.155 };
+const dangerLabel = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: canvasTexture(512, 128, (g, w, h) => {
+    g.fillStyle = '#ffffff'; g.strokeStyle = '#FF3B30'; g.lineWidth = 10;
+    g.beginPath(); g.roundRect(6, 6, w - 12, h - 12, 54); g.fill(); g.stroke();
+    g.fillStyle = '#C62828'; g.font = `bold 54px ${SIGN_FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(DANGER_LABEL.text, w / 2, h / 2 + 3);
+  }),
+  transparent: true, depthWrite: false, sizeAttenuation: false,
+}));
+{
+  const a = DANGER_LABEL.angle * Math.PI / 180, r = SECRETS.ring - SECRETS.ringW / 2;
+  const x = digger.position.x + r * Math.cos(a), z = digger.position.z + r * Math.sin(a);
+  dangerLabel.position.set(x, groundAt(x, z) + 3, z);
+}
+dangerLabel.scale.set(DANGER_LABEL.w, DANGER_LABEL.w / 4, 1);
+dangerLabel.name = 'dangerLabel'; dangerLabel.visible = false; dangerLabel.renderOrder = 3;
+scene.add(dangerLabel);
+
+// Pulsing glow on the pickup's flag (the same size on screen whatever the zoom)
+const flagGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: canvasTexture(64, 64, (g, w, h) => {
+    const grad = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    grad.addColorStop(0, 'rgba(255,230,120,1)'); grad.addColorStop(0.35, 'rgba(255,190,40,0.7)'); grad.addColorStop(1, 'rgba(255,170,0,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, w, h);
+  }),
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: false,
+}));
+flagGlow.name = 'flagGlow'; flagGlow.visible = false;
+flagPickup.userData.flag.add(flagGlow);
+
+const secretsBtn = document.getElementById('secretsBtn');
+function setSecrets(on) {
+  secretsOn = on;
+  for (const m of [...blindSpots, dangerRing, dangerLabel, flagGlow]) m.visible = on;
+  if (on) blindSpots.forEach(drapeBlindSpot);
+  if (secretsBtn) { secretsBtn.setAttribute('aria-pressed', String(on)); secretsBtn.classList.toggle('on', on); }
+}
+function updateSecrets(t1) {
+  if (!secretsOn) return;
+  blindSpots.forEach((m, i) => { m.userData.t += t1; if (m.userData.t >= SECRETS.drapeEvery) { m.userData.t = 0; drapeBlindSpot(m); } });
+  const k = 0.5 + 0.5 * Math.sin(performance.now() / 300);
+  flagGlow.scale.setScalar(0.045 + 0.02 * k);              // × screen: ~43-63 px on an 800 px tall screen
+  flagGlow.material.opacity = 0.65 + 0.35 * k;
+}
+if (secretsBtn) secretsBtn.addEventListener('click', () => setSecrets(!secretsOn));
+blindSpots.forEach((m, i) => { m.userData.t = i * SECRETS.drapeEvery / 2; });   // the two trucks re-drape on alternate frames
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1) * TIME_SCALE;     // no big jumps after a hidden tab
   updateMine(dt);
   updatePicking(dt / TIME_SCALE);
+  updateSecrets(dt / TIME_SCALE);
   controls.update();
   limitCamera();
   renderer.render(scene, camera);
