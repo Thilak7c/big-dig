@@ -29,6 +29,24 @@
     opacity: 0; transition: opacity 0.8s ease;
   }
   #banner b { display: block; font-size: 24px; margin-bottom: 4px; }
+  #card {
+    position: fixed; right: 16px; top: 50%; transform: translateY(-50%); width: 300px; box-sizing: border-box;
+    background: #fff; border-radius: 20px; padding: 18px 20px 20px; box-shadow: 0 8px 28px rgba(0,0,0,0.2);
+    font-size: 17px; line-height: 1.45; user-select: none;
+  }
+  #card[hidden] { display: none; }
+  #cardEmoji { font-size: 48px; line-height: 1; }
+  #card h2 { margin: 8px 48px 6px 0; font-size: 22px; }
+  #card p { margin: 0; }
+  #cardClose {
+    position: absolute; top: 10px; right: 10px; width: 44px; height: 44px; border: 0; border-radius: 22px;
+    background: #f0f0f0; color: var(--ink); font-size: 20px; cursor: pointer;
+  }
+  @media (max-width: 600px) {     /* narrow screens: the card sits at the bottom, clear of the object */
+    #card { left: 12px; right: 12px; top: auto; bottom: 12px; transform: none; width: auto; padding: 14px 16px 16px; font-size: 16px; }
+    #cardEmoji { font-size: 40px; }
+    #card h2 { font-size: 20px; margin-top: 4px; }
+  }
 </style>
 <script type="importmap">
 {
@@ -41,6 +59,7 @@
 </head>
 <body>
 <div id="title"><h1>Big <span>Dig</span></h1><p>A day inside a giant coal mine</p></div>
+<div id="card" hidden><button id="cardClose" aria-label="Close">✕</button><div id="cardEmoji"></div><h2 id="cardTitle"></h2><p id="cardText"></p></div>
 <div id="banner"><b>This part is done! 🎉</b>The rock will go back and trees will be planted. Starting again…</div>
 
 <script type="module">
@@ -413,7 +432,9 @@ function makeSoilMaterial() {
     uSand:    { value: new THREE.Color(COLORS.sandstone) },
     uCoal:    { value: new THREE.Color(COLORS.coal) },
     uRock:    { value: new THREE.Color(COLORS.floorRock) },
+    uSeamGlow: { value: 0 },                 // > 0 while the coal seam's fact card is open
   };
+  mat.userData.seamGlow = uniforms.uSeamGlow;
   const f = (v) => v.toFixed(2);
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -424,6 +445,7 @@ function makeSoilMaterial() {
   vUp = normalize(mat3(modelMatrix) * objectNormal).y;`);
     shader.fragmentShader = `
       uniform vec3 uDust, uTopsoil, uClay, uSand, uCoal, uRock;
+      uniform float uSeamGlow;
       varying float vWorldY;
       varying float vUp;
       vec3 soilBand(float y) {
@@ -438,7 +460,9 @@ function makeSoilMaterial() {
       '#include <color_fragment>',
       // flat ground is dusted grey; steep faces (walls) are a little darker so each step stands out
       `float flatness = smoothstep(0.8, 0.97, vUp);
-      diffuseColor.rgb = mix(soilBand(vWorldY), uDust, flatness * 0.55) * vColor.r * mix(0.8, 1.0, smoothstep(0.35, 0.9, vUp));`
+      diffuseColor.rgb = mix(soilBand(vWorldY), uDust, flatness * 0.55) * vColor.r * mix(0.8, 1.0, smoothstep(0.35, 0.9, vUp));
+      float seamWall = step(${f(LAYERS.coal)}, vWorldY) * step(vWorldY, ${f(LAYERS.sandstone)}) * (1.0 - flatness);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.96, 0.71, 0.0), uSeamGlow * seamWall * 0.5);`
     ).replace(
       '#include <roughnessmap_fragment>',
       // the coal seam on the walls has a slight sheen
@@ -2122,10 +2146,172 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ───────────────────────── Tap / click → fact cards ─────────────────────────
+const CARDS = {
+  hauler:   ['🚛', 'Mega Hauler', "I'm one of the biggest trucks in the world! One load weighs about as much as 50 elephants. When I tip, I'm as tall as a 5-storey building. My driver climbs stairs to get in!"],
+  digger:   ['🦾', 'Big Digger', "I dig the rock first, then the black coal underneath. I fill a Mega Hauler in about 4 scoops. I never swing my bucket over a truck's cab — that keeps the driver safe."],
+  pickup:   ['🚩', 'Flag Pickup', "Mega Haulers are so big they can't see small cars close to them. That's why I carry a tall flag with a light — so the big truck drivers can spot me. On mine roads, big trucks always go first."],
+  water:    ['💧', 'Water Truck', "Coal mines are very dusty. I spray water on the roads so dust doesn't fly into the air."],
+  spotter:  ['🦺', 'Spotter', "I'm the spotter! I watch the area around the digger and use my flag and hand signals to tell drivers when it's safe."],
+  seam:     ['⚫', 'Coal seam', "This black stripe is coal! It was made from plants that were buried and squashed for millions of years. Above it is rock we must move first."],
+  coalYard: ['⚫', 'Coal stockpile', "Trucks tip the coal into a hopper in the ground. The crusher breaks it into small pieces, and a conveyor belt carries it up to the pile. Later it's taken away — much of it is burned in power stations to make electricity."],
+  dump:     ['🪨', 'Waste dump', "This isn't rubbish — it's the rock that was on top of the coal. One day it can be put back and planted with trees."],
+};
+// Machines and people get an invisible hit sphere that moves with them (at = centre in the object's own
+// space, r in metres); on screen it is never less than 48 px across, so it keeps ~44 px when it touches
+// a neighbour. The coal yard is also found by its meshes; the coal seam and the waste dump by where
+// the tap meets the ground. Nothing is picked through the ground. A tap is a short press that barely
+// moves; drags and pinches only move the camera.
+const PICK = { minPx: 24, slack: 15, tapPx: 8, tapMs: 500, ease: 1, closer: 0.65 };
+const yardObjs = ['coalPile', 'conveyor', 'conveyorLegs', 'crusherShed'].map((n) => scene.getObjectByName(n));
+const dumpObjs = ['wasteDump', 'dumpBerm', 'wasteMounds'].map((n) => scene.getObjectByName(n));
+const TARGETS = [
+  ...haulers.map((h) => ({ card: 'hauler', obj: h, at: [0, 3.5, 0], r: 8 })),
+  { card: 'digger', obj: digger, at: [1, 5, 0], r: 9 },
+  { card: 'pickup', obj: flagPickup, at: [0, 1.5, 0], r: 3.5 },
+  { card: 'water', obj: waterTruck, at: [0, 2, 0], r: 6 },
+  { card: 'spotter', obj: spotter, at: [0, 1, 0], r: 2 },
+  { card: 'coalYard', obj: coalPile, at: [0, 0.4, 0], r: () => coalPile.scale.x * 0.9, objs: yardObjs },
+];
+const raycaster = new THREE.Raycaster(), _ndc = new THREE.Vector2(), _pc = new THREE.Vector3(), _pq = new THREE.Vector3();
+
+// How far along a ray the ground is (Infinity if it never meets it within maxT)
+function groundT(o, d, maxT = 3000) {
+  let t = 0, prev = 0;
+  while (t < maxT) {
+    const gap = o.y + d.y * t - groundAt(o.x + d.x * t, o.z + d.z * t);
+    if (gap < 0) {                                         // went under: home in on the surface
+      let a = prev, b = t;
+      for (let i = 0; i < 12; i++) { const m = (a + b) / 2; if (o.y + d.y * m < groundAt(o.x + d.x * m, o.z + d.z * m)) b = m; else a = m; }
+      return a;
+    }
+    prev = t;
+    t += clamp(gap * 0.3, 0.4, 20);                        // walls are steep, so creep when close
+  }
+  return Infinity;
+}
+// Can the camera see this point (or a point just above it)?
+function inSight(p, r) {
+  for (const up of [0, r * 0.8]) {
+    const q = _pq.set(p.x, p.y + up, p.z), d = q.clone().sub(camera.position), len = d.length();
+    if (groundT(camera.position, d.divideScalar(len), len) >= len - r) return true;
+  }
+  return false;
+}
+const steep = (x, z) => Math.hypot(groundAt(x + 0.6, z) - groundAt(x - 0.6, z), groundAt(x, z + 0.6) - groundAt(x, z - 0.6)) / 1.2 > 1;
+
+// What is under this screen point (nx, ny from -1 to 1)? → { card, objs, focus } or null
+function pickAt(nx, ny) {
+  const W = window.innerWidth, H = window.innerHeight;
+  raycaster.setFromCamera(_ndc.set(nx, ny), camera);
+  const { origin, direction } = raycaster.ray, tGround = groundT(origin, direction);
+  const pxPerM = H / 2 / Math.tan(camera.fov * Math.PI / 360);   // × (1 / distance)
+  let best = null;
+  for (const tg of TARGETS) {
+    tg.obj.updateMatrixWorld();
+    const c = tg.obj.localToWorld(_pc.set(...tg.at)).clone(), r = typeof tg.r === 'function' ? tg.r() : tg.r;
+    const q = c.clone().project(camera);
+    if (q.z > 1) continue;
+    const dist = camera.position.distanceTo(c), rPx = Math.max(PICK.minPx, r / dist * pxPerM);
+    const score = Math.hypot((q.x - nx) * W / 2, (q.y - ny) * H / 2) / rPx;
+    if (score > 1 || (best && score >= best.score)) continue;
+    if (tGround < dist - r - PICK.slack || !inSight(c, r)) continue;     // ground in the way
+    best = { score, card: tg.card, objs: tg.objs || [tg.obj], focus: c };
+  }
+  if (best) return best;
+  const near = (objs) => { const h = raycaster.intersectObjects(objs, true)[0]; return h && h.distance < tGround + 0.5; };
+  if (near(yardObjs)) return { card: 'coalYard', objs: yardObjs, focus: coalPile.position.clone().setY(coalPile.scale.y * 0.5) };
+  if (near([dumpObjs[2]])) return { card: 'dump', objs: dumpObjs, focus: raycaster.intersectObject(dumpObjs[2])[0].point };
+  if (tGround === Infinity) return null;
+  const p = origin.clone().addScaledVector(direction, tGround);
+  if (dumpH(p.x, p.z) > 0.05) return { card: 'dump', objs: dumpObjs, focus: p };
+  if (p.y > LAYERS.coal && p.y < LAYERS.sandstone && p.y > FLOOR_Y + 0.3 && steep(p.x, p.z)) return { card: 'seam', objs: [], focus: p };
+  return null;
+}
+
+// Highlight: the picked object's meshes swap to a yellow-glowing copy of their material (copies are
+// shared and made once); the coal seam glows through the soil shader. Lights that already glow are left.
+const hlMats = new Map(), seamGlow = soilMat.userData.seamGlow;
+function highlight(objs, on) {
+  for (const o of objs) o.traverse((m) => {
+    if (!m.isMesh) return;
+    if (on) {
+      const src = m.material;
+      if (Array.isArray(src) || !src.emissive || src.emissive.getHex() !== 0) return;
+      if (!hlMats.has(src)) { const c = src.clone(); c.emissive.set(COLORS.yellow); hlMats.set(src, c); }
+      m.userData.preHl = src; m.material = hlMats.get(src);
+    } else if (m.userData.preHl) {
+      if (m.material === hlMats.get(m.userData.preHl)) m.material = m.userData.preHl;
+      delete m.userData.preHl;
+    }
+  });
+}
+
+// Card
+const cardEl = document.getElementById('card'), cardEmoji = document.getElementById('cardEmoji');
+const cardTitle = document.getElementById('cardTitle'), cardText = document.getElementById('cardText');
+let picked = null;
+function closeCard() {
+  if (!picked) return;
+  highlight(picked.objs, false);
+  picked = null;
+  cardEl.hidden = true;
+}
+function openCard(hit) {
+  closeCard();
+  picked = hit;
+  highlight(hit.objs, true);
+  [cardEmoji.textContent, cardTitle.textContent, cardText.textContent] = CARDS[hit.card];
+  cardEl.hidden = false;
+  // ease toward it: look at it and come ~35% closer along the same line (so it stays in view)
+  const c1 = hit.focus.clone().lerp(camera.position, PICK.closer);
+  const d = c1.distanceTo(hit.focus), min = controls.minDistance + 10;
+  if (d < min) c1.copy(hit.focus).addScaledVector(c1.clone().sub(hit.focus).normalize(), min);
+  c1.y = Math.max(c1.y, groundAt(c1.x, c1.z) + 8);
+  camEase = { t: 0, t0: controls.target.clone(), t1: hit.focus.clone(), c0: camera.position.clone(), c1 };
+}
+document.getElementById('cardClose').addEventListener('click', closeCard);
+
+// Camera ease (1 s); any drag, pinch or wheel by the user stops it
+let camEase = null;
+controls.addEventListener('start', () => { camEase = null; });
+function updatePicking(t1) {
+  if (camEase) {
+    camEase.t = Math.min(camEase.t + t1 / PICK.ease, 1);
+    const k = smoothstep(0, 1, camEase.t);
+    controls.target.lerpVectors(camEase.t0, camEase.t1, k);
+    camera.position.lerpVectors(camEase.c0, camEase.c1, k);
+    if (camEase.t >= 1) camEase = null;
+  }
+  // a soft pulse on whatever is highlighted
+  const glow = 0.3 + 0.1 * Math.sin(performance.now() / 250);
+  for (const m of hlMats.values()) m.emissiveIntensity = glow;
+  seamGlow.value = picked && picked.card === 'seam' ? glow * 2 : 0;
+}
+
+// Taps: one finger, under 8 px of movement and half a second
+{
+  const down = new Map();
+  let multi = false;
+  const el = renderer.domElement;
+  el.addEventListener('pointerdown', (e) => { down.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() }); multi = down.size > 1 || (multi && down.size > 0); });
+  const up = (e, cancel) => {
+    const p = down.get(e.pointerId);
+    down.delete(e.pointerId);
+    if (!p || cancel || multi) { if (down.size === 0) multi = false; return; }
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > PICK.tapPx || performance.now() - p.t > PICK.tapMs) return;
+    const hit = pickAt(e.clientX / window.innerWidth * 2 - 1, 1 - e.clientY / window.innerHeight * 2);
+    if (hit) openCard(hit); else closeCard();
+  };
+  el.addEventListener('pointerup', (e) => up(e, false));
+  el.addEventListener('pointercancel', (e) => up(e, true));
+}
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1) * TIME_SCALE;     // no big jumps after a hidden tab
   updateMine(dt);
+  updatePicking(dt / TIME_SCALE);
   controls.update();
   limitCamera();
   renderer.render(scene, camera);
