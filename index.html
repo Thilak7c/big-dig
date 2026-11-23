@@ -42,16 +42,62 @@
     position: absolute; top: 10px; right: 10px; width: 44px; height: 44px; border: 0; border-radius: 22px;
     background: #f0f0f0; color: var(--ink); font-size: 20px; cursor: pointer;
   }
-  #secretsBtn {
-    position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); min-height: 52px; padding: 0 20px;
-    border: 0; border-radius: 26px; background: var(--card); color: var(--ink); font: 700 18px var(--font);
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15); cursor: pointer; user-select: none;
+  #card { max-height: calc(100vh - 200px); overflow-y: auto; }
+  #title { transition: opacity 0.3s; }
+  /* Dashboard (top left): running totals */
+  #dash {
+    position: fixed; top: 12px; left: 12px; background: var(--card); border-radius: 16px; padding: 8px 14px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12); user-select: none; white-space: nowrap;
   }
-  #secretsBtn.on { background: var(--yellow); }
-  @media (max-width: 600px) {     /* narrow screens: the card sits at the bottom (above the Secrets button), clear of the object */
-    #card { left: 12px; right: 12px; top: auto; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); transform: none; width: auto; padding: 14px 16px 16px; font-size: 16px; }
+  .stat { display: flex; align-items: center; gap: 8px; height: 34px; }
+  .stat > div { display: flex; align-items: center; gap: 6px; }
+  .stat i { font-style: normal; font-size: 20px; width: 26px; text-align: center; }
+  .stat b { font-size: 24px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 14px; opacity: 0.75; }
+  .stat small { font-size: 12px; opacity: 0.7; }
+  .stat.ele { flex-wrap: wrap; height: auto; row-gap: 0; padding-bottom: 2px; }
+  .stat.ele > div { height: 34px; }
+  .stat.ele small { flex-basis: 100%; padding-left: 32px; margin-top: -6px; }   /* caption under the number */
+  /* Buttons: 🏠 bottom left; speed and Secrets bottom right */
+  .pill {
+    height: 52px; border: 0; border-radius: 26px; background: var(--card); color: var(--ink); font: 700 18px var(--font);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15); cursor: pointer; user-select: none; padding: 0 20px;
+  }
+  .pill.on, #speed button.on { background: var(--yellow); }
+  #homeBtn { position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); padding: 0 18px; }
+  #controls { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 8px; }
+  #speed { display: flex; gap: 4px; padding: 4px; }
+  #speed button {
+    width: 48px; height: 44px; border: 0; border-radius: 22px; background: transparent; color: var(--ink);
+    font: 700 18px var(--font); cursor: pointer;
+  }
+  /* Narrow screens (phones held upright): dashboard in one row under the title, 🏠 top right,
+     the card at the bottom above the buttons (clear of the object, which the camera centres) */
+  @media (max-width: 760px) {
+    #title { padding: 6px 12px 8px; max-width: calc(100vw - 152px); box-sizing: border-box; }   /* clear of 🏠 */
+    #title p { font-size: min(13px, 3.4vw); }
+    #dash { top: 84px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; padding: 6px 10px; }
+    .stat { flex-direction: column; height: auto; gap: 0; min-width: 96px; }
+    .stat span { font-size: 13px; }
+    .stat.ele small { padding-left: 0; margin-top: 0; flex-basis: auto; }
+    #homeBtn { left: auto; right: 12px; bottom: auto; top: 12px; width: 52px; padding: 0; }
+    #homeBtn span { display: none; }
+    #controls { right: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); gap: 6px; }
+    #speed button { width: 44px; }
+    #secretsBtn { padding: 0 14px; font-size: 16px; }
+    #card {
+      left: 12px; right: 12px; top: auto; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); transform: none; width: auto;
+      padding: 14px 16px 16px; font-size: 16px; max-height: calc(100vh - 250px - env(safe-area-inset-bottom, 0px));
+    }
     #cardEmoji { font-size: 40px; }
     #card h2 { font-size: 20px; margin-top: 4px; }
+  }
+  /* Short wide screens (phones held sideways): the card sits top right; the title steps aside while it is open */
+  @media (min-width: 761px) and (max-height: 500px) {
+    #card { top: 12px; transform: none; width: 280px; max-height: calc(100vh - 96px); padding: 14px 16px 16px; font-size: 16px; }
+    #cardEmoji { font-size: 40px; }
+    #card h2 { font-size: 20px; margin-top: 4px; }
+    body.card-open #title { opacity: 0; }
   }
 </style>
 <script type="importmap">
@@ -66,7 +112,18 @@
 <body>
 <div id="title"><h1>Big <span>Dig</span></h1><p>A day inside a giant coal mine</p></div>
 <div id="card" hidden><button id="cardClose" aria-label="Close">✕</button><div id="cardEmoji"></div><h2 id="cardTitle"></h2><p id="cardText"></p></div>
-<button id="secretsBtn" aria-pressed="false">🔍 Secrets</button>
+<div id="dash">
+  <div class="stat"><div><i>⚫</i><b id="dashCoal">0</b></div><span>Coal loads</span></div>
+  <div class="stat"><div><i>🪨</i><b id="dashRock">0</b></div><span>Rock loads</span></div>
+  <div class="stat ele"><div><i>🐘</i><b id="dashEle">0</b></div><span>Elephants moved</span><small>1 load ≈ 50 🐘</small></div>
+</div>
+<button id="homeBtn" class="pill" aria-label="Overview">🏠<span> Overview</span></button>
+<div id="controls">
+  <div id="speed" class="pill" role="group" aria-label="Speed">
+    <button id="speed0" aria-label="Pause" aria-pressed="false">⏸</button><button id="speed1" class="on" aria-pressed="true">1×</button><button id="speed2" aria-pressed="false">2×</button><button id="speed4" aria-pressed="false">4×</button>
+  </div>
+  <button id="secretsBtn" class="pill" aria-pressed="false">🔍 Secrets</button>
+</div>
 <div id="banner"><b>This part is done! 🎉</b>The rock will go back and trees will be planted. Starting again…</div>
 
 <script type="module">
@@ -184,11 +241,12 @@ const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerH
 // Start view: from the south-west, looking north-east across the pit at the digging face, the digger
 // and the loading pad, with the ramp and the coal pile beyond. Narrow (portrait) screens start further back.
 const START_VIEW = { target: [-10, -20, -40], az: 145, el: 28 };
-{
-  const dist = Math.max(148, 205 / camera.aspect ** 0.85), az = START_VIEW.az * Math.PI / 180, el = START_VIEW.el * Math.PI / 180;
+function startCameraPos(aspect) {
+  const dist = Math.max(148, 205 / aspect ** 0.85), az = START_VIEW.az * Math.PI / 180, el = START_VIEW.el * Math.PI / 180;
   const [tx, ty, tz] = START_VIEW.target;
-  camera.position.set(tx + dist * Math.cos(el) * Math.cos(az), ty + dist * Math.sin(el), tz + dist * Math.cos(el) * Math.sin(az));
+  return new THREE.Vector3(tx + dist * Math.cos(el) * Math.cos(az), ty + dist * Math.sin(el), tz + dist * Math.cos(el) * Math.sin(az));
 }
+camera.position.copy(startCameraPos(camera.aspect));
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(...START_VIEW.target);
@@ -1585,7 +1643,7 @@ function updateTruck(d, dt) {
   if (d.task === 'load') {
     if (d.loaded) { d.task = null; startNextLeg(d); }
   } else if (d.task === 'tip') {
-    if (updateTip(d, dt)) { d.task = null; onDelivered(d.load); startNextLeg(d); }
+    if (updateTip(d, dt)) { d.task = null; countLoad(d.load); onDelivered(d.load); startNextLeg(d); }
   } else if (d.wait > 0) {
     d.wait -= dt;
     if (d.wait <= 0) startNextLeg(d);
@@ -2263,6 +2321,7 @@ function closeCard() {
   highlight(picked.objs, false);
   picked = null;
   cardEl.hidden = true;
+  document.body.classList.remove('card-open');
 }
 function openCard(hit) {
   closeCard();
@@ -2270,6 +2329,7 @@ function openCard(hit) {
   highlight(hit.objs, true);
   [cardEmoji.textContent, cardTitle.textContent, cardText.textContent] = CARDS[hit.card];
   cardEl.hidden = false;
+  document.body.classList.add('card-open');
   // ease toward it: look at it and come ~35% closer along the same line (so it stays in view)
   const c1 = hit.focus.clone().lerp(camera.position, PICK.closer);
   const d = c1.distanceTo(hit.focus), min = controls.minDistance + 10;
@@ -2438,12 +2498,44 @@ function updateSecrets(t1) {
 if (secretsBtn) secretsBtn.addEventListener('click', () => setSecrets(!secretsOn));
 blindSpots.forEach((m, i) => { m.userData.t = i * SECRETS.drapeEvery / 2; });   // the two trucks re-drape on alternate frames
 
+// ───────────────────────── Dashboard, speed control, overview ─────────────────────────
+// Running totals since the page opened (they carry on across the cycle reset)
+const totals = { coal: 0, rock: 0 };
+const ELEPHANTS_PER_LOAD = 345 / 7;         // a 345 t load, ~7 t per elephant: 1 truckload ≈ 50 elephants
+const dashCoal = document.getElementById('dashCoal'), dashRock = document.getElementById('dashRock'), dashEle = document.getElementById('dashEle');
+function countLoad(load) {
+  totals[load]++;
+  dashCoal.textContent = totals.coal.toLocaleString('en-US');
+  dashRock.textContent = totals.rock.toLocaleString('en-US');
+  dashEle.textContent = Math.round((totals.coal + totals.rock) * ELEPHANTS_PER_LOAD).toLocaleString('en-US');
+}
+
+// Speed: ⏸ / 1× / 2× / 4×. The world runs `speed` normal-sized steps per frame, so 4× is exactly 1×,
+// only sooner (every timer, particle and the wet strip follow). The camera ease, taps, cards and the
+// highlight pulses run on real time, so they still work while paused.
+const SPEEDS = [0, 1, 2, 4];
+let speed = 1;
+const speedBtns = SPEEDS.map((v) => document.getElementById(`speed${v}`));
+function setSpeed(v) {
+  speed = v;
+  speedBtns.forEach((b, i) => { b.classList.toggle('on', SPEEDS[i] === v); b.setAttribute('aria-pressed', String(SPEEDS[i] === v)); });
+}
+speedBtns.forEach((b, i) => b.addEventListener('click', () => setSpeed(SPEEDS[i])));
+function stepWorld(real) {                  // real = seconds since the last frame
+  for (let i = 0; i < speed; i++) updateMine(real * TIME_SCALE);
+  updateSecrets(real * speed);
+  updatePicking(real);
+}
+
+// 🏠 Overview: ease back to the start view (for the current screen shape)
+document.getElementById('homeBtn').addEventListener('click', () => {
+  camEase = { t: 0, t0: controls.target.clone(), t1: new THREE.Vector3(...START_VIEW.target),
+    c0: camera.position.clone(), c1: startCameraPos(camera.aspect) };
+});
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.1) * TIME_SCALE;     // no big jumps after a hidden tab
-  updateMine(dt);
-  updatePicking(dt / TIME_SCALE);
-  updateSecrets(dt / TIME_SCALE);
+  stepWorld(Math.min(clock.getDelta(), 0.1));     // no big jumps after a hidden tab
   controls.update();
   limitCamera();
   renderer.render(scene, camera);
