@@ -6,6 +6,15 @@ You watch, tap things to learn about them, and find hidden safety secrets.
 
 Everything is in one file, `index.html`: Three.js from a CDN, every shape built in code, and no other libraries.
 
+![Tapping the Big Digger opens its fact card](docs/screenshots/desktop-2-card.png)
+
+<p>
+  <img src="docs/screenshots/portrait-3-secrets.png" alt="Secrets on a phone: blind spots and the digger's danger circle" width="260">
+  <img src="docs/screenshots/landscape-5-badge.png" alt="The Junior Site Inspector badge on a phone held sideways" width="560">
+</p>
+
+More screenshots of phones and desktop are in [docs/screenshots](docs/screenshots).
+
 ## Run it
 
 ```sh
