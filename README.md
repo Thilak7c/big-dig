@@ -1,5 +1,7 @@
 # Big Dig
 
+**Play it live: https://thilak7c.github.io/big-dig/**
+
 A small 3D world of a make-believe open-pit coal mine, for kids and curious grown-ups. Two giant
 Mega Haulers, a Big Digger, a water truck, a flag pickup and a spotter work in a loop that runs forever.
 You watch, tap things to learn about them, and find hidden safety secrets.
